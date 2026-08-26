@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  Anchor,
   BookOpen,
   ChartNoAxesColumnIncreasing,
   CircleUserRound,
@@ -14,6 +13,8 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import Image from "next/image";
+import { logoutUser } from "@/lib/auth";
+import { useRouter } from "next/navigation";
 
 const navigation = [
   {
@@ -55,6 +56,7 @@ const navigation = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
 
   return (
     <aside className="fixed left-0 top-0 z-40 flex h-screen w-[230px] flex-col bg-[#062b4f] text-white">
@@ -102,7 +104,13 @@ export default function Sidebar() {
 
       {/* Logout */}
       <div className="border-t border-white/10 p-4">
-        <button className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm text-blue-100 hover:bg-white/10 hover:text-white">
+        <button
+          onClick={async () => {
+            await logoutUser();
+            router.push("/login");
+          }}
+          className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm text-blue-100 hover:bg-white/10 hover:text-white"
+        >
           <LogOut size={18} />
           Logout
         </button>

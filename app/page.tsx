@@ -1,3 +1,5 @@
+"use client";
+
 import {
   ArrowRight,
   Award,
@@ -10,8 +12,13 @@ import Link from "next/link";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { useAuth } from "@/components/AuthProvider";
 
 export default function HomePage() {
+  const { user, loading } = useAuth();
+
+  const displayName = user?.displayName || "Cadet";
+
   return (
     <ProtectedRoute>
       <div className="min-h-screen bg-[#f5f8fb]">
@@ -24,7 +31,7 @@ export default function HomePage() {
             {/* Welcome */}
             <section className="mb-7">
               <h1 className="text-2xl font-bold text-[#062b4f]">
-                Welcome back, Cadet! 👋
+                Welcome back, {loading ? "..." : displayName} 👋
               </h1>
 
               <p className="mt-1 text-sm text-slate-500">

@@ -1,69 +1,82 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
 import {
   Anchor,
   ArrowRight,
-  Bell,
   BookOpen,
-  CircleUserRound,
   Radio,
   Ship,
   TriangleAlert,
 } from "lucide-react";
+
 import Link from "next/link";
+
+import { collection, getDocs, orderBy, query, where } from "firebase/firestore";
+
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
+import { useAuth } from "@/components/AuthProvider";
+import { db } from "@/lib/firebase";
+import type { Module } from "@/lib/types";
 
-const modules = [
-  {
-    number: "01",
-    title: "Bridge Communication",
-    description: "Essential bridge communication and standard phraseology.",
-    icon: Ship,
-    progress: 70,
-    type: "Communication",
-  },
-  {
-    number: "02",
-    title: "Anchoring Operations",
-    description: "Practice communication during anchoring procedures.",
-    icon: Anchor,
-    progress: 65,
-    type: "Operations",
-  },
-  {
-    number: "03",
-    title: "Mooring Operations",
-    description: "Learn standard communication during mooring.",
-    icon: Ship,
-    progress: 40,
-    type: "Operations",
-  },
-  {
-    number: "04",
-    title: "VHF Communication",
-    description: "Practice standardized VHF communication.",
-    icon: Radio,
-    progress: 30,
-    type: "Communication",
-  },
-  {
-    number: "05",
-    title: "Navigation & Watchkeeping",
-    description: "Communication for navigation and watchkeeping.",
-    icon: BookOpen,
-    progress: 20,
-    type: "Navigation",
-  },
-  {
-    number: "06",
-    title: "Emergency Communication",
-    description: "Standard communication during emergencies.",
-    icon: TriangleAlert,
-    progress: 10,
-    type: "Emergency",
-  },
-];
+const moduleIcons = {
+  Communication: Radio,
+  Operations: Anchor,
+  Navigation: BookOpen,
+  Emergency: TriangleAlert,
+};
 
 export default function ModulesPage() {
+  const { user, loading: authLoading } = useAuth();
+
+  const [modules, setModules] = useState<Module[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Wait until Firebase finishes checking authentication
+    if (authLoading) {
+      return;
+    }
+
+    // User is not logged in
+    if (!user) {
+      setModules([]);
+      setLoading(false);
+      return;
+    }
+
+    async function loadModules() {
+      try {
+        setLoading(true);
+
+        const modulesRef = collection(db, "modules");
+
+        const modulesQuery = query(
+          modulesRef,
+          where("published", "==", true),
+          orderBy("order", "asc"),
+        );
+
+        const snapshot = await getDocs(modulesQuery);
+
+        const data = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        })) as Module[];
+
+        setModules(data);
+      } catch (error) {
+        console.error("Error loading modules:", error);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadModules();
+  }, [user, authLoading]);
+
   return (
     <div className="min-h-screen bg-[#f5f8fb]">
       <Sidebar />
@@ -72,6 +85,7 @@ export default function ModulesPage() {
         <Topbar />
 
         <main className="p-8">
+          {/* Header */}
           <div className="mb-8">
             <p className="text-xs font-semibold uppercase tracking-widest text-[#168dcc]">
               Learning Center
@@ -86,76 +100,132 @@ export default function ModulesPage() {
             </p>
           </div>
 
-          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-            {modules.map((module) => {
-              const Icon = module.icon;
-
-              return (
-                <Link
-                  href="/simulation"
-                  key={module.number}
-                  className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
+          {/* Loading */}
+          {loading && (
+            <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+              {[1, 2, 3].map((item) => (
+                <div
+                  key={item}
+                  className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
                 >
-                  {/* Image placeholder */}
-                  <div className="relative flex h-40 items-center justify-center overflow-hidden bg-gradient-to-br from-[#08365f] via-[#0b5b96] to-[#168dcc]">
-                    <div className="absolute inset-0 opacity-20">
-                      <div className="absolute -right-10 -top-10 h-40 w-40 rounded-full border-[20px] border-white" />
-                      <div className="absolute -bottom-16 -left-10 h-48 w-48 rounded-full border-[15px] border-white" />
-                    </div>
-
-                    <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-white/95 text-[#0b4778] shadow-lg">
-                      <Icon size={30} strokeWidth={1.5} />
-                    </div>
-
-                    <span className="absolute left-4 top-4 rounded-full bg-black/20 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
-                      Module {module.number}
-                    </span>
-                  </div>
+                  <div className="h-40 animate-pulse bg-slate-200" />
 
                   <div className="p-5">
-                    <span className="text-[10px] font-semibold uppercase tracking-widest text-[#168dcc]">
-                      {module.type}
-                    </span>
+                    <div className="h-3 w-24 animate-pulse rounded bg-slate-200" />
 
-                    <h2 className="mt-1 text-lg font-bold text-[#062b4f]">
-                      {module.title}
-                    </h2>
+                    <div className="mt-3 h-5 w-40 animate-pulse rounded bg-slate-200" />
 
-                    <p className="mt-2 min-h-[40px] text-xs leading-5 text-slate-500">
-                      {module.description}
-                    </p>
+                    <div className="mt-3 h-10 animate-pulse rounded bg-slate-100" />
 
-                    <div className="mt-5">
-                      <div className="mb-2 flex justify-between text-xs">
-                        <span className="text-slate-400">Progress</span>
-                        <span className="font-semibold text-[#1478bd]">
-                          {module.progress}%
-                        </span>
+                    <div className="mt-5 h-2 animate-pulse rounded-full bg-slate-100" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Modules */}
+          {!loading && modules.length > 0 && (
+            <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+              {modules.map((module, index) => {
+                const Icon =
+                  moduleIcons[module.type as keyof typeof moduleIcons] || Ship;
+
+                const moduleNumber = String(index + 1).padStart(2, "0");
+
+                // Temporary until student progress is implemented
+                const progress = 0;
+
+                return (
+                  <Link
+                    href={`/simulation?module=${module.id}`}
+                    key={module.id}
+                    className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
+                  >
+                    {/* Image / Visual */}
+                    <div className="relative flex h-40 items-center justify-center overflow-hidden bg-gradient-to-br from-[#08365f] via-[#0b5b96] to-[#168dcc]">
+                      <div className="absolute inset-0 opacity-20">
+                        <div className="absolute -right-10 -top-10 h-40 w-40 rounded-full border-[20px] border-white" />
+
+                        <div className="absolute -bottom-16 -left-10 h-48 w-48 rounded-full border-[15px] border-white" />
                       </div>
 
-                      <div className="h-2 rounded-full bg-slate-100">
-                        <div
-                          className="h-full rounded-full bg-[#168dcc]"
-                          style={{ width: `${module.progress}%` }}
-                        />
+                      <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-white/95 text-[#0b4778] shadow-lg">
+                        <Icon size={30} strokeWidth={1.5} />
                       </div>
+
+                      <span className="absolute left-4 top-4 rounded-full bg-black/20 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
+                        Module {moduleNumber}
+                      </span>
                     </div>
 
-                    <div className="mt-5 flex items-center justify-between">
-                      <span className="text-xs font-semibold text-slate-400">
-                        Continue learning
+                    {/* Content */}
+                    <div className="p-5">
+                      <span className="text-[10px] font-semibold uppercase tracking-widest text-[#168dcc]">
+                        {module.type || "Maritime Communication"}
                       </span>
 
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#e6f3fb] text-[#1478bd] transition group-hover:bg-[#1478bd] group-hover:text-white">
-                        <ArrowRight size={15} />
+                      <h2 className="mt-1 text-lg font-bold text-[#062b4f]">
+                        {module.title}
+                      </h2>
+
+                      <p className="mt-2 min-h-[40px] text-xs leading-5 text-slate-500">
+                        {module.description}
+                      </p>
+
+                      {/* Progress */}
+                      <div className="mt-5">
+                        <div className="mb-2 flex justify-between text-xs">
+                          <span className="text-slate-400">Progress</span>
+
+                          <span className="font-semibold text-[#1478bd]">
+                            {progress}%
+                          </span>
+                        </div>
+
+                        <div className="h-2 rounded-full bg-slate-100">
+                          <div
+                            className="h-full rounded-full bg-[#168dcc]"
+                            style={{
+                              width: `${progress}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Continue */}
+                      <div className="mt-5 flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-400">
+                          Start learning
+                        </span>
+
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#e6f3fb] text-[#1478bd] transition group-hover:bg-[#1478bd] group-hover:text-white">
+                          <ArrowRight size={15} />
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
+                  </Link>
+                );
+              })}
+            </div>
+          )}
 
+          {/* Empty State */}
+          {!loading && modules.length === 0 && (
+            <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
+              <BookOpen size={32} className="mx-auto text-slate-300" />
+
+              <h3 className="mt-3 font-semibold text-[#062b4f]">
+                No modules available
+              </h3>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Check back later for available learning modules.
+              </p>
+            </div>
+          )}
+
+          {/* More Modules */}
           <div className="mt-7 rounded-xl bg-[#dcecf9] p-6">
             <div className="flex items-center gap-4">
               <div className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-[#1478bd]">

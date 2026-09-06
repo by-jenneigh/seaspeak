@@ -6,6 +6,7 @@ import {
   Anchor,
   ArrowRight,
   BookOpen,
+  Check,
   Radio,
   Ship,
   TriangleAlert,
@@ -13,14 +14,31 @@ import {
 
 import Link from "next/link";
 
-import { collection, getDocs, orderBy, query, where } from "firebase/firestore";
+import { collection, getDocs } from "firebase/firestore";
 
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import { useAuth } from "@/components/AuthProvider";
 import { db } from "@/lib/firebase";
 
-import type { Module } from "@/lib/types";
+type Module = {
+  id: string;
+  title: string;
+  description: string;
+  order?: number;
+  type?: string;
+  published?: boolean;
+};
+
+type ProgressData = {
+  moduleId: string;
+  completedScenarios: number;
+  totalScenarios: number;
+  progressPercent: number;
+  currentScenarioIndex: number;
+  lastScenarioId: string;
+  completedScenarioIds?: string[];
+};
 
 const moduleIcons = {
   Communication: Radio,
@@ -33,44 +51,140 @@ export default function ModulesPage() {
   const { user, loading: authLoading } = useAuth();
 
   const [modules, setModules] = useState<Module[]>([]);
+  const [progressMap, setProgressMap] = useState<Record<string, ProgressData>>(
+    {},
+  );
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Wait until Firebase finishes checking authentication
     if (authLoading) {
       return;
     }
 
-    // User is not logged in
     if (!user) {
       setModules([]);
+      setProgressMap({});
       setLoading(false);
       return;
     }
+
+    // Capture the UID after confirming that the user exists.
+    // This prevents TypeScript from treating user as possibly null
+    // inside the async loadModules function.
+    const uid = user.uid;
 
     async function loadModules() {
       try {
         setLoading(true);
 
+        /*
+         * Load modules.
+         *
+         * We filter and sort client-side to avoid requiring
+         * a Firestore composite index.
+         */
         const modulesRef = collection(db, "modules");
+        const modulesSnapshot = await getDocs(modulesRef);
 
-        const modulesQuery = query(
-          modulesRef,
-          where("published", "==", true),
-          orderBy("order", "asc"),
-        );
+        const data: Module[] = modulesSnapshot.docs
+          .map((moduleDoc) => {
+            const firestoreData = moduleDoc.data();
 
-        const snapshot = await getDocs(modulesQuery);
+            return {
+              id: moduleDoc.id,
+              title:
+                typeof firestoreData.title === "string"
+                  ? firestoreData.title
+                  : "",
+              description:
+                typeof firestoreData.description === "string"
+                  ? firestoreData.description
+                  : "",
+              order:
+                typeof firestoreData.order === "number"
+                  ? firestoreData.order
+                  : 0,
+              type:
+                typeof firestoreData.type === "string"
+                  ? firestoreData.type
+                  : undefined,
+              published:
+                typeof firestoreData.published === "boolean"
+                  ? firestoreData.published
+                  : true,
+            };
+          })
+          .filter((module) => module.published !== false);
 
-        const data: Module[] = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        })) as Module[];
+        data.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
         setModules(data);
+
+        /*
+         * Load:
+         *
+         * users/{uid}/progress/{moduleId}
+         *
+         * We load the progress collection because we need progress
+         * for all modules displayed on this page.
+         */
+        const progressRef = collection(db, "users", uid, "progress");
+        const progressSnapshot = await getDocs(progressRef);
+
+        const progress: Record<string, ProgressData> = {};
+
+        progressSnapshot.docs.forEach((progressDoc) => {
+          const progressData = progressDoc.data();
+
+          const moduleId =
+            typeof progressData.moduleId === "string"
+              ? progressData.moduleId
+              : progressDoc.id;
+
+          progress[moduleId] = {
+            moduleId,
+
+            completedScenarios:
+              typeof progressData.completedScenarios === "number"
+                ? progressData.completedScenarios
+                : 0,
+
+            totalScenarios:
+              typeof progressData.totalScenarios === "number"
+                ? progressData.totalScenarios
+                : 0,
+
+            progressPercent:
+              typeof progressData.progressPercent === "number"
+                ? Math.min(100, Math.max(0, progressData.progressPercent))
+                : 0,
+
+            currentScenarioIndex:
+              typeof progressData.currentScenarioIndex === "number"
+                ? progressData.currentScenarioIndex
+                : 0,
+
+            lastScenarioId:
+              typeof progressData.lastScenarioId === "string"
+                ? progressData.lastScenarioId
+                : "",
+
+            completedScenarioIds: Array.isArray(
+              progressData.completedScenarioIds,
+            )
+              ? progressData.completedScenarioIds.filter(
+                  (id): id is string => typeof id === "string",
+                )
+              : [],
+          };
+        });
+
+        setProgressMap(progress);
       } catch (error) {
         console.error("Error loading modules:", error);
+
         setModules([]);
+        setProgressMap({});
       } finally {
         setLoading(false);
       }
@@ -87,7 +201,6 @@ export default function ModulesPage() {
         <Topbar />
 
         <main className="p-8">
-          {/* Header */}
           <div className="mb-8">
             <p className="text-xs font-semibold uppercase tracking-widest text-[#168dcc]">
               Learning Center
@@ -102,7 +215,6 @@ export default function ModulesPage() {
             </p>
           </div>
 
-          {/* Authentication Loading */}
           {authLoading && (
             <div className="rounded-xl border border-slate-200 bg-white p-10 text-center">
               <p className="text-sm text-slate-500">
@@ -111,7 +223,6 @@ export default function ModulesPage() {
             </div>
           )}
 
-          {/* Data Loading */}
           {!authLoading && loading && (
             <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
               {[1, 2, 3].map((item) => (
@@ -135,7 +246,6 @@ export default function ModulesPage() {
             </div>
           )}
 
-          {/* Not authenticated */}
           {!authLoading && !user && (
             <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
               <BookOpen size={32} className="mx-auto text-slate-300" />
@@ -157,7 +267,6 @@ export default function ModulesPage() {
             </div>
           )}
 
-          {/* Modules */}
           {!authLoading && user && !loading && modules.length > 0 && (
             <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
               {modules.map((module, index) => {
@@ -166,18 +275,25 @@ export default function ModulesPage() {
 
                 const moduleNumber = String(index + 1).padStart(2, "0");
 
-                // TODO:
-                // Replace this with actual student progress
-                // from Firestore later.
-                const progress = 0;
+                const moduleProgress = progressMap[module.id];
+
+                const progress = Math.min(
+                  100,
+                  Math.max(0, moduleProgress?.progressPercent ?? 0),
+                );
+
+                const completed = progress >= 100;
+
+                const started = progress > 0 && progress < 100;
 
                 return (
                   <Link
-                    href={`/simulation?module=${module.id}`}
+                    href={`/simulation?moduleId=${encodeURIComponent(
+                      module.id,
+                    )}`}
                     key={module.id}
                     className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
                   >
-                    {/* Image / Visual */}
                     <div className="relative flex h-40 items-center justify-center overflow-hidden bg-gradient-to-br from-[#08365f] via-[#0b5b96] to-[#168dcc]">
                       <div className="absolute inset-0 opacity-20">
                         <div className="absolute -right-10 -top-10 h-40 w-40 rounded-full border-[20px] border-white" />
@@ -192,9 +308,15 @@ export default function ModulesPage() {
                       <span className="absolute left-4 top-4 rounded-full bg-black/20 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
                         Module {moduleNumber}
                       </span>
+
+                      {completed && (
+                        <span className="absolute right-4 top-4 flex items-center gap-1 rounded-full bg-green-500 px-3 py-1 text-[10px] font-bold text-white">
+                          <Check size={12} />
+                          Completed
+                        </span>
+                      )}
                     </div>
 
-                    {/* Content */}
                     <div className="p-5">
                       <span className="text-[10px] font-semibold uppercase tracking-widest text-[#168dcc]">
                         {module.type || "Maritime Communication"}
@@ -208,7 +330,6 @@ export default function ModulesPage() {
                         {module.description}
                       </p>
 
-                      {/* Progress */}
                       <div className="mt-5">
                         <div className="mb-2 flex justify-between text-xs">
                           <span className="text-slate-400">Progress</span>
@@ -220,7 +341,7 @@ export default function ModulesPage() {
 
                         <div className="h-2 rounded-full bg-slate-100">
                           <div
-                            className="h-full rounded-full bg-[#168dcc]"
+                            className="h-full rounded-full bg-[#168dcc] transition-all"
                             style={{
                               width: `${progress}%`,
                             }}
@@ -228,10 +349,13 @@ export default function ModulesPage() {
                         </div>
                       </div>
 
-                      {/* Continue */}
                       <div className="mt-5 flex items-center justify-between">
                         <span className="text-xs font-semibold text-slate-400">
-                          Start learning
+                          {completed
+                            ? "Review module"
+                            : started
+                              ? "Continue learning"
+                              : "Start learning"}
                         </span>
 
                         <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#e6f3fb] text-[#1478bd] transition group-hover:bg-[#1478bd] group-hover:text-white">
@@ -245,7 +369,6 @@ export default function ModulesPage() {
             </div>
           )}
 
-          {/* Empty State */}
           {!authLoading && user && !loading && modules.length === 0 && (
             <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
               <BookOpen size={32} className="mx-auto text-slate-300" />
@@ -260,7 +383,6 @@ export default function ModulesPage() {
             </div>
           )}
 
-          {/* More Modules */}
           <div className="mt-7 rounded-xl bg-[#dcecf9] p-6">
             <div className="flex items-center gap-4">
               <div className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-[#1478bd]">

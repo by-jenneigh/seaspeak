@@ -1,5 +1,8 @@
 "use client";
 
+import { Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+
 import {
   ArrowLeft,
   Check,
@@ -9,13 +12,21 @@ import {
   Mic,
   Play,
   RotateCcw,
+  Square,
   Video,
   Volume2,
 } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
-import { collection, doc, getDoc, getDocs } from "firebase/firestore";
+import { useEffect, useRef, useState } from "react";
+import {
+  addDoc,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  serverTimestamp,
+  setDoc,
+} from "firebase/firestore";
 
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
@@ -37,16 +48,11 @@ type Scenario = {
   title: string;
   order: number;
   dialogue: DialogueLine[];
-
-  // NEW DATA MODEL
   options: ScenarioOption[];
   correctOptionId: string;
-
   explanation: string;
   difficulty?: string;
   published?: boolean;
-
-  // Additional fields from the new data model
   studentRole?: string;
   communicationChannel?: string;
   situation?: string;
@@ -66,9 +72,19 @@ type Module = {
   published?: boolean;
 };
 
-export default function SimulationPage() {
+type ModuleProgress = {
+  moduleId: string;
+  completedScenarioIds: string[];
+  completedScenarios: number;
+  totalScenarios: number;
+  progressPercent: number;
+  currentScenarioIndex: number;
+  lastScenarioId: string;
+};
+
+function SimulationPageContent() {
   const searchParams = useSearchParams();
-  const moduleId = searchParams.get("module");
+  const moduleId = searchParams.get("moduleId") || searchParams.get("module");
 
   const { user, loading: authLoading } = useAuth();
 
@@ -81,11 +97,257 @@ export default function SimulationPage() {
 
   const [cameraEnabled, setCameraEnabled] = useState(false);
 
+  const [isRecording, setIsRecording] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+
+  const [transcript, setTranscript] = useState("");
+  const [aiScore, setAiScore] = useState<number | null>(null);
+  const [aiClarity, setAiClarity] = useState<number | null>(null);
+  const [aiPhraseology, setAiPhraseology] = useState<number | null>(null);
+  const [aiFeedback, setAiFeedback] = useState("");
+
+  const [recordingError, setRecordingError] = useState("");
+
+  const [playingSpeechId, setPlayingSpeechId] = useState<string | null>(null);
+  const [speechSupported, setSpeechSupported] = useState(true);
+  const [activeDialogueIndex, setActiveDialogueIndex] = useState<number | null>(
+    null,
+  );
+
+  const [completedScenarioIds, setCompletedScenarioIds] = useState<string[]>(
+    [],
+  );
+  const [moduleProgress, setModuleProgress] = useState(0);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   /*
-   * Load module + scenarios
+   * Load available browser voices.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setSpeechSupported(false);
+      return;
+    }
+
+    const loadVoices = () => {
+      speechVoicesRef.current = window.speechSynthesis.getVoices();
+    };
+
+    loadVoices();
+
+    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+
+    return () => {
+      window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
+
+      window.speechSynthesis.cancel();
+    };
+  }, []);
+
+  /*
+   * Stop any speech currently playing.
+   */
+  function stopSpeech() {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    speechUtteranceRef.current = null;
+    setPlayingSpeechId(null);
+    setActiveDialogueIndex(null);
+  }
+
+  /*
+   * Get the best available English voice.
+   */
+  function getPreferredVoice() {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return null;
+    }
+
+    const voices =
+      speechVoicesRef.current.length > 0
+        ? speechVoicesRef.current
+        : window.speechSynthesis.getVoices();
+
+    return (
+      voices.find((voice) => voice.lang.toLowerCase() === "en-gb") ||
+      voices.find((voice) => voice.lang.toLowerCase().startsWith("en-gb")) ||
+      voices.find((voice) => voice.lang.toLowerCase() === "en-us") ||
+      voices.find((voice) => voice.lang.toLowerCase().startsWith("en-")) ||
+      null
+    );
+  }
+
+  /*
+   * Speak a single response option.
+   */
+  function speakOption(option: ScenarioOption) {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setRecordingError("Speech practice is not supported by this browser.");
+      return;
+    }
+
+    const speechId = `option-${option.id}`;
+
+    if (playingSpeechId === speechId) {
+      stopSpeech();
+      return;
+    }
+
+    stopSpeech();
+
+    const utterance = new SpeechSynthesisUtterance(option.text);
+
+    utterance.lang = "en-GB";
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    const voice = getPreferredVoice();
+
+    if (voice) {
+      utterance.voice = voice;
+    }
+
+    utterance.onstart = () => {
+      setPlayingSpeechId(speechId);
+    };
+
+    utterance.onend = () => {
+      setPlayingSpeechId(null);
+      speechUtteranceRef.current = null;
+    };
+
+    utterance.onerror = () => {
+      setPlayingSpeechId(null);
+      speechUtteranceRef.current = null;
+    };
+
+    speechUtteranceRef.current = utterance;
+    setPlayingSpeechId(speechId);
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  /*
+   * Speak the complete incoming communication.
+   */
+  function speakIncomingCommunication() {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setRecordingError("Speech practice is not supported by this browser.");
+      return;
+    }
+
+    const currentScenario = scenarios[currentScenarioIndex];
+
+    if (!currentScenario || currentScenario.dialogue.length === 0) {
+      return;
+    }
+
+    if (playingSpeechId === "incoming") {
+      stopSpeech();
+      return;
+    }
+
+    stopSpeech();
+
+    const dialogue = currentScenario.dialogue.filter(
+      (line) => line.text.trim() !== "",
+    );
+
+    if (dialogue.length === 0) {
+      return;
+    }
+
+    let dialogueIndex = 0;
+
+    const speakNextLine = () => {
+      if (
+        dialogueIndex >= dialogue.length ||
+        typeof window === "undefined" ||
+        !("speechSynthesis" in window)
+      ) {
+        setPlayingSpeechId(null);
+        setActiveDialogueIndex(null);
+        speechUtteranceRef.current = null;
+        return;
+      }
+
+      const currentLine = dialogue[dialogueIndex];
+
+      const utterance = new SpeechSynthesisUtterance(currentLine.text);
+
+      utterance.lang = "en-GB";
+      utterance.rate = 0.9;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+
+      const voice = getPreferredVoice();
+
+      if (voice) {
+        utterance.voice = voice;
+      }
+
+      utterance.onstart = () => {
+        setPlayingSpeechId("incoming");
+
+        const originalIndex = currentScenario.dialogue.findIndex(
+          (line) =>
+            line.speaker === currentLine.speaker &&
+            line.text === currentLine.text,
+        );
+
+        setActiveDialogueIndex(
+          originalIndex >= 0 ? originalIndex : dialogueIndex,
+        );
+      };
+
+      utterance.onend = () => {
+        dialogueIndex += 1;
+
+        if (dialogueIndex < dialogue.length) {
+          speakNextLine();
+        } else {
+          setPlayingSpeechId(null);
+          setActiveDialogueIndex(null);
+          speechUtteranceRef.current = null;
+        }
+      };
+
+      utterance.onerror = () => {
+        setPlayingSpeechId(null);
+        setActiveDialogueIndex(null);
+        speechUtteranceRef.current = null;
+      };
+
+      speechUtteranceRef.current = utterance;
+
+      window.speechSynthesis.speak(utterance);
+    };
+
+    setPlayingSpeechId("incoming");
+
+    speakNextLine();
+  }
+
+  /*
+   * Load module, scenarios, and the student's saved progress.
    */
   useEffect(() => {
     if (authLoading) {
@@ -104,249 +366,133 @@ export default function SimulationPage() {
     }
 
     async function loadSimulation() {
+      if (authLoading) return;
+
+      if (!user) {
+        setError("You must be logged in to access simulations.");
+        setLoading(false);
+        return;
+      }
+
+      if (!moduleId) {
+        setError("No module was specified.");
+        setLoading(false);
+        return;
+      }
+
       try {
         setLoading(true);
         setError("");
 
-        /*
-         * ----------------------------------------
-         * Get module
-         * modules/{moduleId}
-         * ----------------------------------------
-         */
-
+        // 1. Load module
         const moduleRef = doc(db, "modules", moduleId);
-        const moduleSnapshot = await getDoc(moduleRef);
+        const moduleSnap = await getDoc(moduleRef);
 
-        if (!moduleSnapshot.exists()) {
-          setError("Module not found.");
-          setLoading(false);
+        if (!moduleSnap.exists()) {
+          setError(`Module "${moduleId}" was not found.`);
           return;
         }
 
-        const rawModuleData = moduleSnapshot.data();
+        const moduleData = moduleSnap.data();
 
-        const moduleData: Module = {
-          id: moduleSnapshot.id,
+        setModule({
+          id: moduleSnap.id,
+          title: moduleData.title || "Untitled Module",
+          description: moduleData.description || "",
+          type: moduleData.type || "",
+          order: typeof moduleData.order === "number" ? moduleData.order : 0,
+          published: moduleData.published !== false,
+        });
 
-          title:
-            typeof rawModuleData.title === "string"
-              ? rawModuleData.title
-              : "Untitled Module",
-
-          description:
-            typeof rawModuleData.description === "string"
-              ? rawModuleData.description
-              : "",
-
-          type:
-            typeof rawModuleData.type === "string"
-              ? rawModuleData.type
-              : undefined,
-
-          order:
-            typeof rawModuleData.order === "number"
-              ? rawModuleData.order
-              : undefined,
-
-          published:
-            typeof rawModuleData.published === "boolean"
-              ? rawModuleData.published
-              : undefined,
-        };
-
-        setModule(moduleData);
-
-        /*
-         * ----------------------------------------
-         * Get scenarios
-         * modules/{moduleId}/scenarios
-         * ----------------------------------------
-         */
-
+        // 2. Load scenarios
         const scenariosRef = collection(db, "modules", moduleId, "scenarios");
 
-        const scenariosSnapshot = await getDocs(scenariosRef);
+        const scenariosSnap = await getDocs(scenariosRef);
 
-        const scenarioData: Scenario[] = scenariosSnapshot.docs.map(
-          (scenarioDoc) => {
+        const loadedScenarios = scenariosSnap.docs
+          .map((scenarioDoc) => {
             const data = scenarioDoc.data();
-
-            /*
-             * ----------------------------------------
-             * Dialogue
-             * ----------------------------------------
-             */
-
-            const dialogue: DialogueLine[] = Array.isArray(data.dialogue)
-              ? data.dialogue
-                  .filter(
-                    (item): item is Record<string, unknown> =>
-                      typeof item === "object" && item !== null,
-                  )
-                  .map((item) => ({
-                    speaker:
-                      typeof item.speaker === "string"
-                        ? item.speaker
-                        : "Speaker",
-
-                    text: typeof item.text === "string" ? item.text : "",
-                  }))
-              : [];
-
-            /*
-             * ----------------------------------------
-             * OPTIONS
-             *
-             * IMPORTANT:
-             * The new Firestore data model uses:
-             *
-             * options: [...]
-             * correctOptionId: "..."
-             *
-             * NOT:
-             *
-             * choices
-             * correctAnswer
-             * ----------------------------------------
-             */
-
-            const options: ScenarioOption[] = Array.isArray(data.options)
-              ? data.options
-                  .map((item, index): ScenarioOption | null => {
-                    // Firestore option stored as a simple string
-                    if (typeof item === "string") {
-                      return {
-                        id: String.fromCharCode(97 + index), // a, b, c, d...
-                        text: item,
-                      };
-                    }
-
-                    // Firestore option stored as an object
-                    if (typeof item === "object" && item !== null) {
-                      const option = item as Record<string, unknown>;
-
-                      const id =
-                        typeof option.id === "string"
-                          ? option.id
-                          : typeof option.optionId === "string"
-                            ? option.optionId
-                            : String.fromCharCode(97 + index);
-
-                      const text =
-                        typeof option.text === "string"
-                          ? option.text
-                          : typeof option.label === "string"
-                            ? option.label
-                            : typeof option.value === "string"
-                              ? option.value
-                              : "";
-
-                      if (!text.trim()) {
-                        return null;
-                      }
-
-                      return {
-                        id,
-                        text,
-                      };
-                    }
-
-                    return null;
-                  })
-                  .filter((option): option is ScenarioOption => option !== null)
-              : [];
-            /*
-             * ----------------------------------------
-             * Scenario
-             * ----------------------------------------
-             */
 
             return {
               id: scenarioDoc.id,
-
-              title:
-                typeof data.title === "string"
-                  ? data.title
-                  : `Scenario ${scenarioDoc.id}`,
+              title: data.title || "Untitled Scenario",
 
               order: typeof data.order === "number" ? data.order : 0,
 
-              dialogue,
+              dialogue: Array.isArray(data.dialogue) ? data.dialogue : [],
 
-              options,
+              options: Array.isArray(data.options) ? data.options : [],
 
               correctOptionId:
                 typeof data.correctOptionId === "string"
                   ? data.correctOptionId
                   : "",
 
-              explanation:
-                typeof data.explanation === "string" ? data.explanation : "",
+              explanation: data.explanation || "",
+              difficulty: data.difficulty || "",
+              published: data.published !== false,
 
-              difficulty:
-                typeof data.difficulty === "string"
-                  ? data.difficulty
-                  : undefined,
-
-              published:
-                typeof data.published === "boolean"
-                  ? data.published
-                  : undefined,
-
-              studentRole:
-                typeof data.studentRole === "string"
-                  ? data.studentRole
-                  : undefined,
-
-              communicationChannel:
-                typeof data.communicationChannel === "string"
-                  ? data.communicationChannel
-                  : undefined,
-
-              situation:
-                typeof data.situation === "string" ? data.situation : undefined,
-
-              prompt: typeof data.prompt === "string" ? data.prompt : undefined,
-
-              responseMode:
-                typeof data.responseMode === "string"
-                  ? data.responseMode
-                  : undefined,
-
-              expectedResponse:
-                typeof data.expectedResponse === "string"
-                  ? data.expectedResponse
-                  : undefined,
-
-              wrongAnswerEffect:
-                typeof data.wrongAnswerEffect === "string"
-                  ? data.wrongAnswerEffect
-                  : undefined,
-
-              assessment: data.assessment,
+              studentRole: data.studentRole || "",
+              communicationChannel: data.communicationChannel || "",
+              situation: data.situation || "",
+              prompt: data.prompt || "",
+              responseMode: data.responseMode || "",
+              expectedResponse: data.expectedResponse || "",
+              wrongAnswerEffect: data.wrongAnswerEffect || "",
+              assessment: data.assessment || null,
             };
-          },
-        );
+          })
+          .filter((scenario) => scenario.published !== false)
+          .sort((a, b) => a.order - b.order);
 
-        /*
-         * Sort scenarios by order.
-         */
-        scenarioData.sort((a, b) => a.order - b.order);
+        setScenarios(loadedScenarios);
 
-        console.log("Loaded scenarios:", scenarioData);
+        // 3. Load this user's progress for this module
+        //
+        // Firestore structure:
+        // users/{uid}/progress/{moduleId}
+        //
+        // This is a DOCUMENT, so use doc(), not collection().
+        const progressRef = doc(db, "users", user.uid, "progress", moduleId);
 
-        setScenarios(scenarioData);
+        const progressSnap = await getDoc(progressRef);
 
-        /*
-         * Reset scenario state.
-         */
-        setCurrentScenarioIndex(0);
+        if (progressSnap.exists()) {
+          const progressData = progressSnap.data();
+
+          const completedIds = Array.isArray(progressData.completedScenarioIds)
+            ? progressData.completedScenarioIds.filter(
+                (id): id is string => typeof id === "string",
+              )
+            : [];
+
+          setCompletedScenarioIds(completedIds);
+
+          const savedIndex =
+            typeof progressData.currentScenarioIndex === "number"
+              ? progressData.currentScenarioIndex
+              : 0;
+
+          setCurrentScenarioIndex(
+            Math.min(
+              Math.max(savedIndex, 0),
+              Math.max(loadedScenarios.length - 1, 0),
+            ),
+          );
+        } else {
+          setCompletedScenarioIds([]);
+          setCurrentScenarioIndex(0);
+        }
+
+        // Reset current-session response state
         setSelectedAnswer(null);
         setSubmitted(false);
-      } catch (err) {
-        console.error("Error loading simulation:", err);
-        setError("Unable to load this simulation. Please try again.");
+      } catch (error) {
+        console.error("Error loading simulation:", error);
+
+        setError(
+          error instanceof Error ? error.message : "Unable to load simulation.",
+        );
       } finally {
         setLoading(false);
       }
@@ -356,60 +502,449 @@ export default function SimulationPage() {
   }, [user, authLoading, moduleId]);
 
   /*
-   * Current scenario
+   * Cleanup on page unmount.
    */
-  const currentScenario = scenarios[currentScenarioIndex];
+  useEffect(() => {
+    return () => {
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+      }
+
+      mediaRecorderRef.current?.stop();
+
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
 
   /*
-   * Calculate progress
+   * Camera handling.
    */
+  useEffect(() => {
+    if (!cameraEnabled || !navigator.mediaDevices?.getUserMedia) {
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+
+      return;
+    }
+
+    let cancelled = false;
+
+    async function enableCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+        });
+
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        mediaStreamRef.current = stream;
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      } catch (err) {
+        console.error("Camera error:", err);
+
+        setCameraEnabled(false);
+
+        setRecordingError(
+          "Unable to access your camera. Please check browser permissions.",
+        );
+      }
+    }
+
+    enableCamera();
+
+    return () => {
+      cancelled = true;
+
+      const stream = videoRef.current?.srcObject as MediaStream | null;
+
+      stream?.getTracks().forEach((track) => track.stop());
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    };
+  }, [cameraEnabled]);
+
+  const currentScenario = scenarios[currentScenarioIndex];
+
   const scenarioNumber = currentScenarioIndex + 1;
   const totalScenarios = scenarios.length;
 
-  const progress =
+  const scenarioPositionProgress =
     totalScenarios > 0
       ? Math.round((scenarioNumber / totalScenarios) * 100)
       : 0;
 
   /*
-   * Submit answer
+   * Save the student's current module progress.
    */
-  function handleSubmit() {
-    if (!currentScenario || !selectedAnswer) {
+  async function saveModuleProgress(
+    scenarioIndex: number,
+    completedIds: string[],
+  ) {
+    if (!user || !moduleId || scenarios.length === 0) {
       return;
     }
 
-    setSubmitted(true);
+    const uniqueCompletedIds = Array.from(new Set(completedIds)).filter((id) =>
+      scenarios.some((scenario) => scenario.id === id),
+    );
+
+    const completedCount = uniqueCompletedIds.length;
+
+    const progressPercent = Math.round(
+      (completedCount / scenarios.length) * 100,
+    );
+
+    const safeScenarioIndex = Math.max(
+      0,
+      Math.min(scenarioIndex, Math.max(scenarios.length - 1, 0)),
+    );
+
+    const lastScenario = scenarios[safeScenarioIndex];
+
+    const progressData: ModuleProgress = {
+      moduleId,
+      completedScenarioIds: uniqueCompletedIds,
+      completedScenarios: completedCount,
+      totalScenarios: scenarios.length,
+      progressPercent,
+      currentScenarioIndex: safeScenarioIndex,
+      lastScenarioId: lastScenario?.id || "",
+    };
+
+    await setDoc(
+      doc(db, "users", user.uid, "progress", moduleId),
+      {
+        ...progressData,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    setCompletedScenarioIds(uniqueCompletedIds);
+    setModuleProgress(progressPercent);
   }
 
   /*
-   * Move to next scenario
+   * Start/stop microphone recording.
+   */
+  async function toggleRecording() {
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+
+    try {
+      setRecordingError("");
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Microphone access is not supported by this browser.");
+      }
+
+      stopSpeech();
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
+
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
+          : "";
+
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+
+      mediaRecorderRef.current = recorder;
+
+      setAudioBlob(null);
+      setTranscript("");
+      setAiScore(null);
+      setAiClarity(null);
+      setAiPhraseology(null);
+      setAiFeedback("");
+      setRecordingSeconds(0);
+      setSubmitted(false);
+      setIsRecording(true);
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
+
+        setAudioBlob(blob);
+        setIsRecording(false);
+
+        if (recordingTimerRef.current) {
+          clearInterval(recordingTimerRef.current);
+          recordingTimerRef.current = null;
+        }
+
+        mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+
+        mediaStreamRef.current = null;
+      };
+
+      recorder.start();
+
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingSeconds((seconds) => {
+          if (seconds >= 29) {
+            mediaRecorderRef.current?.stop();
+            return 30;
+          }
+
+          return seconds + 1;
+        });
+      }, 1000);
+    } catch (err) {
+      console.error("Microphone error:", err);
+
+      setIsRecording(false);
+
+      setRecordingError(
+        err instanceof Error
+          ? err.message
+          : "Unable to access your microphone. Please check your browser permissions.",
+      );
+    }
+  }
+
+  /*
+   * Reset recording.
+   */
+  function resetRecording() {
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+    }
+
+    setAudioBlob(null);
+    setTranscript("");
+    setAiScore(null);
+    setAiClarity(null);
+    setAiPhraseology(null);
+    setAiFeedback("");
+    setRecordingSeconds(0);
+    setRecordingError("");
+    setSubmitted(false);
+  }
+
+  /*
+   * Submit selected response + recorded speech
+   * for AI evaluation and save the result.
+   */
+  async function handleSubmit() {
+    if (
+      !currentScenario ||
+      !selectedAnswer ||
+      !audioBlob ||
+      isAnalyzing ||
+      !user ||
+      !moduleId
+    ) {
+      return;
+    }
+
+    try {
+      stopSpeech();
+
+      setIsAnalyzing(true);
+      setRecordingError("");
+
+      const selectedOption = currentScenario.options.find(
+        (option) => option.id === selectedAnswer,
+      );
+
+      const correctOption = currentScenario.options.find(
+        (option) => option.id === currentScenario.correctOptionId,
+      );
+
+      const formData = new FormData();
+
+      formData.append("audio", audioBlob, "student-response.webm");
+
+      formData.append(
+        "scenario",
+        JSON.stringify({
+          title: currentScenario.title,
+          situation: currentScenario.situation,
+          prompt: currentScenario.prompt,
+          expectedResponse: currentScenario.expectedResponse,
+          selectedOption: selectedOption?.text,
+          correctOption: correctOption?.text,
+          explanation: currentScenario.explanation,
+        }),
+      );
+
+      const response = await fetch("/api/ai-evaluate", {
+        method: "POST",
+        body: formData,
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || "AI evaluation failed.");
+      }
+
+      const finalTranscript = result.transcript || "";
+
+      const finalScore = typeof result.score === "number" ? result.score : null;
+
+      const finalClarity =
+        typeof result.clarity === "number" ? result.clarity : null;
+
+      const finalPhraseology =
+        typeof result.phraseology === "number" ? result.phraseology : null;
+
+      const finalFeedback = result.feedback || "";
+
+      const correct = selectedAnswer === currentScenario.correctOptionId;
+
+      setTranscript(finalTranscript);
+      setAiScore(finalScore);
+      setAiClarity(finalClarity);
+      setAiPhraseology(finalPhraseology);
+      setAiFeedback(finalFeedback);
+      setSubmitted(true);
+
+      /*
+       * Save individual attempt.
+       *
+       * users/{uid}/attempts/{attemptId}
+       */
+      await addDoc(collection(db, "users", user.uid, "attempts"), {
+        moduleId,
+        scenarioId: currentScenario.id,
+        scenarioTitle: currentScenario.title,
+
+        selectedOptionId: selectedAnswer,
+        selectedOptionText: selectedOption?.text || "",
+
+        correctOptionId: currentScenario.correctOptionId,
+        correctOptionText: correctOption?.text || "",
+
+        isCorrect: correct,
+
+        transcript: finalTranscript,
+
+        score: finalScore,
+        clarity: finalClarity,
+        phraseology: finalPhraseology,
+
+        feedback: finalFeedback,
+
+        completedAt: serverTimestamp(),
+      });
+
+      /*
+       * Mark this scenario completed.
+       *
+       * A scenario is only added once, so repeating
+       * the scenario does not increase progress.
+       */
+      const updatedCompletedIds = Array.from(
+        new Set([...completedScenarioIds, currentScenario.id]),
+      );
+
+      const nextScenarioIndex =
+        currentScenarioIndex < scenarios.length - 1
+          ? currentScenarioIndex + 1
+          : currentScenarioIndex;
+
+      await saveModuleProgress(nextScenarioIndex, updatedCompletedIds);
+    } catch (err) {
+      console.error("AI evaluation / progress save error:", err);
+
+      setRecordingError(
+        err instanceof Error
+          ? err.message
+          : "Unable to save your result. Please try again.",
+      );
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }
+
+  /*
+   * Move to next scenario.
    */
   function handleNextScenario() {
     if (currentScenarioIndex >= scenarios.length - 1) {
       return;
     }
 
-    setCurrentScenarioIndex((previous) => previous + 1);
+    stopSpeech();
+
+    const nextIndex = currentScenarioIndex + 1;
+
+    setCurrentScenarioIndex(nextIndex);
     setSelectedAnswer(null);
     setSubmitted(false);
+    setAudioBlob(null);
+    setTranscript("");
+    setAiScore(null);
+    setAiClarity(null);
+    setAiPhraseology(null);
+    setAiFeedback("");
+    setRecordingSeconds(0);
+    setRecordingError("");
+
+    void saveModuleProgress(nextIndex, completedScenarioIds);
   }
 
   /*
-   * Go back to previous scenario
+   * Go back to previous scenario.
    */
   function handlePreviousScenario() {
     if (currentScenarioIndex <= 0) {
       return;
     }
 
-    setCurrentScenarioIndex((previous) => previous - 1);
+    stopSpeech();
+
+    const previousIndex = currentScenarioIndex - 1;
+
+    setCurrentScenarioIndex(previousIndex);
     setSelectedAnswer(null);
     setSubmitted(false);
+    setAudioBlob(null);
+    setTranscript("");
+    setAiScore(null);
+    setAiClarity(null);
+    setAiPhraseology(null);
+    setAiFeedback("");
+    setRecordingSeconds(0);
+    setRecordingError("");
+
+    void saveModuleProgress(previousIndex, completedScenarioIds);
   }
 
   /*
-   * Loading authentication
+   * Authentication loading.
    */
   if (authLoading) {
     return (
@@ -432,7 +967,7 @@ export default function SimulationPage() {
   }
 
   /*
-   * Not authenticated
+   * Not authenticated.
    */
   if (!user) {
     return (
@@ -468,7 +1003,7 @@ export default function SimulationPage() {
   }
 
   /*
-   * Loading simulation
+   * Loading simulation.
    */
   if (loading) {
     return (
@@ -500,7 +1035,7 @@ export default function SimulationPage() {
   }
 
   /*
-   * Error
+   * Error.
    */
   if (error || !module) {
     return (
@@ -537,7 +1072,7 @@ export default function SimulationPage() {
   }
 
   /*
-   * No scenarios
+   * No scenarios.
    */
   if (scenarios.length === 0) {
     return (
@@ -574,7 +1109,7 @@ export default function SimulationPage() {
   }
 
   /*
-   * Safety guard
+   * Safety guard.
    */
   if (!currentScenario) {
     return (
@@ -610,10 +1145,9 @@ export default function SimulationPage() {
     );
   }
 
-  /*
-   * Determine whether selected option is correct.
-   */
   const isCorrect = selectedAnswer === currentScenario.correctOptionId;
+
+  const isIncomingPlaying = playingSpeechId === "incoming";
 
   return (
     <div className="min-h-screen bg-[#f5f8fb]">
@@ -623,7 +1157,6 @@ export default function SimulationPage() {
         <Topbar />
 
         <main className="p-8">
-          {/* Header */}
           <div className="mb-5 flex items-center justify-between">
             <div>
               <Link
@@ -643,28 +1176,26 @@ export default function SimulationPage() {
               </p>
             </div>
 
-            {/* Progress */}
             <div className="hidden items-center gap-3 sm:flex">
               <span className="text-xs font-semibold text-slate-500">
-                Progress
+                Module Progress
               </span>
 
               <div className="h-2 w-32 rounded-full bg-slate-200">
                 <div
                   className="h-full rounded-full bg-[#168dcc] transition-all"
                   style={{
-                    width: `${progress}%`,
+                    width: `${moduleProgress}%`,
                   }}
                 />
               </div>
 
               <span className="text-xs font-bold text-[#1478bd]">
-                {progress}%
+                {moduleProgress}%
               </span>
             </div>
           </div>
 
-          {/* Instructions */}
           <div className="mb-6 flex gap-4 rounded-xl border border-[#c8e3f5] bg-[#e6f3fb] p-5">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white text-[#1478bd]">
               <Info size={19} />
@@ -676,47 +1207,104 @@ export default function SimulationPage() {
               </h2>
 
               <p className="mt-1 text-xs leading-5 text-slate-600">
-                Listen to the communication from the Bridge, select the best
-                verbal response, then say your response clearly.
+                Listen to the incoming communication, practice the response
+                options using Listen, select the best verbal response, then say
+                your response clearly.
               </p>
             </div>
           </div>
 
+          {!speechSupported && (
+            <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-700">
+              Speech practice is not supported by this browser. You can still
+              select responses and use the microphone recording feature.
+            </div>
+          )}
+
           <div className="grid gap-6 xl:grid-cols-[1fr_300px]">
-            {/* Main */}
             <div className="space-y-5">
-              {/* Incoming Communication */}
               <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="mb-3 flex items-center justify-between">
-                  <p className="text-xs font-bold uppercase tracking-wider text-[#1478bd]">
-                    Incoming Communication
-                  </p>
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wider text-[#1478bd]">
+                      Incoming Communication
+                    </p>
+
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Listen to the communication before choosing your response.
+                    </p>
+                  </div>
 
                   <button
                     type="button"
-                    className="flex items-center gap-2 rounded-lg bg-[#e6f3fb] px-3 py-2 text-xs font-semibold text-[#0b4778] hover:bg-[#dcecf9]"
+                    onClick={speakIncomingCommunication}
+                    disabled={
+                      !speechSupported || currentScenario.dialogue.length === 0
+                    }
+                    aria-label={
+                      isIncomingPlaying
+                        ? "Stop incoming communication"
+                        : "Listen to incoming communication"
+                    }
+                    title={
+                      isIncomingPlaying
+                        ? "Stop"
+                        : "Listen to incoming communication"
+                    }
+                    className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                      isIncomingPlaying
+                        ? "bg-red-50 text-red-600 hover:bg-red-100"
+                        : "bg-[#e6f3fb] text-[#0b4778] hover:bg-[#dcecf9]"
+                    } disabled:cursor-not-allowed disabled:opacity-40`}
                   >
-                    <Volume2 size={16} />
-                    Play
+                    {isIncomingPlaying ? (
+                      <>
+                        <Square size={15} fill="currentColor" />
+                        Stop
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 size={16} />
+                        Listen
+                      </>
+                    )}
                   </button>
                 </div>
 
                 <div className="space-y-3">
                   {currentScenario.dialogue.length > 0 ? (
-                    currentScenario.dialogue.map((line, index) => (
-                      <div
-                        key={`${currentScenario.id}-dialogue-${index}`}
-                        className="rounded-lg bg-[#e6f3fb] p-5"
-                      >
-                        <p className="mb-2 text-xs font-bold text-[#1478bd]">
-                          {line.speaker}
-                        </p>
+                    currentScenario.dialogue.map((line, index) => {
+                      const isActive =
+                        activeDialogueIndex === index && isIncomingPlaying;
 
-                        <p className="text-base font-semibold leading-7 text-[#173b5e]">
-                          "{line.text}"
-                        </p>
-                      </div>
-                    ))
+                      return (
+                        <div
+                          key={`${currentScenario.id}-dialogue-${index}`}
+                          className={`rounded-lg p-5 transition ${
+                            isActive
+                              ? "bg-[#dcecf9] ring-2 ring-[#168dcc]/30"
+                              : "bg-[#e6f3fb]"
+                          }`}
+                        >
+                          <div className="mb-2 flex items-center justify-between">
+                            <p className="text-xs font-bold text-[#1478bd]">
+                              {line.speaker}
+                            </p>
+
+                            {isActive && (
+                              <span className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-[#1478bd]">
+                                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#168dcc]" />
+                                Speaking
+                              </span>
+                            )}
+                          </div>
+
+                          <p className="text-base font-semibold leading-7 text-[#173b5e]">
+                            "{line.text}"
+                          </p>
+                        </div>
+                      );
+                    })
                   ) : (
                     <div className="rounded-lg bg-slate-50 p-5 text-sm text-slate-500">
                       No dialogue is available for this scenario.
@@ -725,7 +1313,6 @@ export default function SimulationPage() {
                 </div>
               </section>
 
-              {/* Response Options */}
               <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="mb-4">
                   <div className="flex items-center justify-between">
@@ -741,7 +1328,8 @@ export default function SimulationPage() {
                   </div>
 
                   <p className="mt-1 text-xs text-slate-500">
-                    Select the best response, then say it out loud.
+                    Select the best response. Use Listen to hear the recommended
+                    pronunciation and phrasing, then say it out loud.
                   </p>
                 </div>
 
@@ -755,11 +1343,15 @@ export default function SimulationPage() {
                         selected={selectedAnswer === option.id}
                         submitted={submitted}
                         correct={option.id === currentScenario.correctOptionId}
+                        isPlaying={playingSpeechId === `option-${option.id}`}
+                        speechSupported={speechSupported}
                         onClick={() => {
                           if (!submitted) {
+                            stopSpeech();
                             setSelectedAnswer(option.id);
                           }
                         }}
+                        onPlay={() => speakOption(option)}
                       />
                     ))
                   ) : (
@@ -777,7 +1369,6 @@ export default function SimulationPage() {
                 </div>
               </section>
 
-              {/* Video + Audio */}
               <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="mb-5 flex items-center justify-between">
                   <div>
@@ -804,57 +1395,72 @@ export default function SimulationPage() {
                   </button>
                 </div>
 
-                {/* Camera placeholder */}
                 {cameraEnabled && (
                   <div className="mb-5 overflow-hidden rounded-xl bg-[#071f35]">
-                    <div className="relative flex aspect-video items-center justify-center">
-                      <div className="text-center text-white">
-                        <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-full bg-white/10">
-                          <Video size={28} />
-                        </div>
-
-                        <p className="text-sm font-semibold">Webcam Preview</p>
-
-                        <p className="mt-1 text-xs text-white/50">
-                          Camera feed placeholder
-                        </p>
-                      </div>
+                    <div className="relative aspect-video">
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        muted
+                        playsInline
+                        className="h-full w-full object-cover"
+                      />
 
                       <span className="absolute left-4 top-4 flex items-center gap-2 rounded-full bg-red-500/90 px-3 py-1 text-[10px] font-bold text-white">
                         <span className="h-2 w-2 rounded-full bg-white" />
-                        CAMERA
+                        CAMERA LIVE
                       </span>
                     </div>
                   </div>
                 )}
 
-                {/* Audio recorder */}
                 <div className="rounded-xl border border-[#c8e3f5] bg-[#f4f9fd] p-5">
                   <div className="flex items-center gap-5">
                     <button
                       type="button"
-                      className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#0b4778] text-white shadow-md transition hover:bg-[#062b4f]"
+                      onClick={toggleRecording}
+                      disabled={isAnalyzing}
+                      aria-label={
+                        isRecording ? "Stop recording" : "Start recording"
+                      }
+                      className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full text-white shadow-md transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                        isRecording
+                          ? "bg-red-500 hover:bg-red-600"
+                          : "bg-[#0b4778] hover:bg-[#062b4f]"
+                      }`}
                     >
-                      <Mic size={24} />
+                      {isRecording ? (
+                        <span className="h-5 w-5 rounded-sm bg-white" />
+                      ) : (
+                        <Mic size={24} />
+                      )}
                     </button>
 
                     <div className="min-w-0 flex-1">
-                      <div className="mb-2 flex items-center justify-between">
+                      <div className="mb-2 flex items-center justify-between gap-3">
                         <span className="text-xs font-semibold text-[#062b4f]">
-                          Press the microphone and say your response
+                          {isRecording
+                            ? "Recording... speak your response clearly"
+                            : audioBlob
+                              ? "Recording ready for AI evaluation"
+                              : "Press the microphone and say your response"}
                         </span>
 
-                        <span className="font-mono text-xs text-slate-400">
-                          00:00 / 00:30
+                        <span className="shrink-0 font-mono text-xs text-slate-400">
+                          00:
+                          {String(recordingSeconds).padStart(2, "0")} / 00:30
                         </span>
                       </div>
 
-                      {/* Fake waveform */}
                       <div className="flex h-8 items-center gap-[3px] overflow-hidden">
-                        {Array.from({ length: 55 }).map((_, index) => (
+                        {Array.from({
+                          length: 55,
+                        }).map((_, index) => (
                           <span
                             key={index}
-                            className="w-[3px] rounded-full bg-[#168dcc]/40"
+                            className={`w-[3px] rounded-full ${
+                              isRecording ? "bg-red-400" : "bg-[#168dcc]/40"
+                            }`}
                             style={{
                               height: `${8 + ((index * 17) % 22)}px`,
                             }}
@@ -864,10 +1470,25 @@ export default function SimulationPage() {
                     </div>
                   </div>
 
+                  {recordingError && (
+                    <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-600">
+                      {recordingError}
+                    </div>
+                  )}
+
+                  {audioBlob && !isRecording && !recordingError && (
+                    <div className="mt-4 rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-700">
+                      Recording captured successfully. Select your response
+                      above, then submit for AI evaluation.
+                    </div>
+                  )}
+
                   <div className="mt-5 flex items-center justify-between border-t border-[#c8e3f5] pt-4">
                     <button
                       type="button"
-                      className="flex items-center gap-2 text-xs font-semibold text-slate-400 hover:text-[#1478bd]"
+                      onClick={resetRecording}
+                      disabled={isAnalyzing || (!audioBlob && !isRecording)}
+                      className="flex items-center gap-2 text-xs font-semibold text-slate-400 hover:text-[#1478bd] disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <RotateCcw size={14} />
                       Record again
@@ -879,11 +1500,17 @@ export default function SimulationPage() {
                         onClick={handleSubmit}
                         disabled={
                           !selectedAnswer ||
-                          currentScenario.options.length === 0
+                          !audioBlob ||
+                          currentScenario.options.length === 0 ||
+                          isRecording ||
+                          isAnalyzing
                         }
                         className="flex items-center gap-2 rounded-lg bg-[#0b4778] px-5 py-3 text-xs font-bold text-white shadow-sm transition hover:bg-[#062b4f] disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        Submit Response
+                        {isAnalyzing
+                          ? "AI Analyzing..."
+                          : "Submit for AI Evaluation"}
+
                         <ChevronRight size={15} />
                       </button>
                     ) : (
@@ -901,7 +1528,6 @@ export default function SimulationPage() {
                 </div>
               </section>
 
-              {/* Result */}
               {submitted && (
                 <section
                   className={`rounded-xl border p-6 shadow-sm ${
@@ -930,9 +1556,35 @@ export default function SimulationPage() {
                         {isCorrect ? "Correct!" : "Incorrect"}
                       </h2>
 
-                      <p className="mt-2 text-xs leading-5 text-slate-600">
-                        {currentScenario.explanation ||
-                          "No explanation is available for this scenario."}
+                      {aiScore !== null && (
+                        <div className="mt-4 grid grid-cols-3 gap-2">
+                          <ScoreCard label="Overall" value={aiScore} />
+
+                          <ScoreCard label="Clarity" value={aiClarity ?? 0} />
+
+                          <ScoreCard
+                            label="Phraseology"
+                            value={aiPhraseology ?? 0}
+                          />
+                        </div>
+                      )}
+
+                      {transcript && (
+                        <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            Transcript
+                          </p>
+
+                          <p className="mt-2 text-xs leading-5 text-[#173b5e]">
+                            “{transcript}”
+                          </p>
+                        </div>
+                      )}
+
+                      <p className="mt-4 text-xs leading-5 text-slate-600">
+                        {aiFeedback ||
+                          currentScenario.explanation ||
+                          "No AI feedback is available for this scenario."}
                       </p>
 
                       {!isCorrect && currentScenario.correctOptionId && (
@@ -941,15 +1593,23 @@ export default function SimulationPage() {
                           {currentScenario.correctOptionId.toUpperCase()}
                         </p>
                       )}
+
+                      <div className="mt-4 rounded-lg border border-green-200 bg-white p-3">
+                        <p className="text-xs font-semibold text-green-700">
+                          Progress saved
+                        </p>
+
+                        <p className="mt-1 text-xs text-slate-500">
+                          Module progress: {moduleProgress}%
+                        </p>
+                      </div>
                     </div>
                   </div>
                 </section>
               )}
             </div>
 
-            {/* Right column */}
             <aside className="space-y-5">
-              {/* Scenario info */}
               <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                 <h3 className="text-sm font-bold text-[#062b4f]">
                   Scenario Info
@@ -1010,7 +1670,6 @@ export default function SimulationPage() {
                 </div>
               </div>
 
-              {/* Tips */}
               <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center gap-2">
                   <CircleHelp size={17} className="text-[#1478bd]" />
@@ -1021,11 +1680,11 @@ export default function SimulationPage() {
                 <div className="mt-4 space-y-3">
                   <Tip text="Use standard Seaspeak phrases." />
                   <Tip text="Be clear and concise." />
-                  <Tip text='End with "Over".' />
+                  <Tip text={'End with "Over".'} />
+                  <Tip text="Listen to the model pronunciation before speaking." />
                 </div>
               </div>
 
-              {/* Video comparison */}
               <div className="rounded-xl border border-dashed border-[#8fc5e5] bg-[#f4f9fd] p-5">
                 <div className="flex items-center gap-2 text-[#0b4778]">
                   <Video size={17} />
@@ -1041,15 +1700,14 @@ export default function SimulationPage() {
                 </p>
 
                 <div className="mt-4 rounded-lg bg-[#dcecf9] p-3 text-[10px] leading-4 text-[#0b4778]">
-                  <strong>Client comparison:</strong> Audio-only is the
-                  recommended MVP. Video can be enabled as an additional
-                  simulation feature.
+                  <strong>Current setup:</strong> Audio is sent to AI
+                  evaluation. Camera support is available for the student but is
+                  not sent to the AI evaluator.
                 </div>
               </div>
             </aside>
           </div>
 
-          {/* Scenario navigation */}
           <div className="mt-6 flex items-center justify-between rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <button
               type="button"
@@ -1069,7 +1727,9 @@ export default function SimulationPage() {
               type="button"
               onClick={handleNextScenario}
               disabled={
-                !submitted || currentScenarioIndex >= scenarios.length - 1
+                (!submitted &&
+                  !completedScenarioIds.includes(currentScenario.id)) ||
+                currentScenarioIndex >= scenarios.length - 1
               }
               className="flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold text-[#1478bd] transition hover:bg-[#e6f3fb] disabled:cursor-not-allowed disabled:opacity-30"
             >
@@ -1083,23 +1743,26 @@ export default function SimulationPage() {
   );
 }
 
-/*
- * Answer Option
- */
 function AnswerOption({
   letter,
   text,
   selected,
   submitted,
   correct,
+  isPlaying,
+  speechSupported,
   onClick,
+  onPlay,
 }: {
   letter: string;
   text: string;
   selected: boolean;
   submitted: boolean;
   correct: boolean;
+  isPlaying: boolean;
+  speechSupported: boolean;
   onClick: () => void;
+  onPlay: () => void;
 }) {
   let containerClass =
     "border-slate-200 bg-white hover:border-[#9bcce7] hover:bg-slate-50";
@@ -1125,32 +1788,74 @@ function AnswerOption({
   }
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={submitted}
-      className={`flex w-full items-center gap-4 rounded-xl border p-4 text-left transition ${containerClass} ${
-        submitted ? "cursor-default" : ""
-      }`}
+    <div
+      className={`flex w-full items-center gap-2 rounded-xl border p-2 transition ${containerClass}`}
     >
-      <div
-        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-xs font-bold ${letterClass}`}
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={submitted}
+        className="flex min-w-0 flex-1 items-center gap-4 rounded-lg p-2 text-left transition hover:bg-black/[0.02] disabled:cursor-default"
       >
-        {submitted && correct ? <Check size={16} /> : letter.toUpperCase()}
-      </div>
+        <div
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-xs font-bold ${letterClass}`}
+        >
+          {submitted && correct ? <Check size={16} /> : letter.toUpperCase()}
+        </div>
 
-      <span className="flex-1 text-sm font-medium leading-6 text-[#173b5e]">
-        {text}
-      </span>
+        <span className="min-w-0 flex-1 text-sm font-medium leading-6 text-[#173b5e]">
+          {text}
+        </span>
+      </button>
 
-      {!submitted && <Play size={16} className="text-slate-400" />}
-    </button>
+      <button
+        type="button"
+        onClick={onPlay}
+        disabled={!speechSupported}
+        aria-label={
+          isPlaying
+            ? `Stop practice for option ${letter}`
+            : `Listen to option ${letter}`
+        }
+        title={
+          isPlaying ? "Stop practice" : "Listen to recommended pronunciation"
+        }
+        className={`flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition ${
+          isPlaying
+            ? "bg-red-50 text-red-600 hover:bg-red-100"
+            : "bg-[#e6f3fb] text-[#0b4778] hover:bg-[#dcecf9]"
+        } disabled:cursor-not-allowed disabled:opacity-40`}
+      >
+        {isPlaying ? (
+          <>
+            <Square size={14} fill="currentColor" />
+
+            <span className="hidden sm:inline">Stop</span>
+          </>
+        ) : (
+          <>
+            <Play size={14} fill="currentColor" />
+
+            <span className="hidden sm:inline">Listen</span>
+          </>
+        )}
+      </button>
+    </div>
   );
 }
 
-/*
- * Info Row
- */
+function ScoreCard({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-3 text-center">
+      <p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+        {label}
+      </p>
+
+      <p className="mt-1 text-lg font-bold text-[#0b4778]">{value}%</p>
+    </div>
+  );
+}
+
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -1163,9 +1868,6 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-/*
- * Tip
- */
 function Tip({ text }: { text: string }) {
   return (
     <div className="flex items-start gap-3">
@@ -1178,13 +1880,28 @@ function Tip({ text }: { text: string }) {
   );
 }
 
-/*
- * Small icon for empty state
- */
 function BookOpenIcon() {
   return (
     <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#e6f3fb] text-[#1478bd]">
       <Play size={20} />
     </div>
+  );
+}
+
+export default function SimulationPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-[#f5f8fb]">
+          <div className="flex min-h-screen items-center justify-center">
+            <div className="rounded-xl border border-slate-200 bg-white px-8 py-6 text-center shadow-sm">
+              <p className="text-sm text-slate-500">Loading simulation...</p>
+            </div>
+          </div>
+        </div>
+      }
+    >
+      <SimulationPageContent />
+    </Suspense>
   );
 }

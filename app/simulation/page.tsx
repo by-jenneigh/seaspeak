@@ -213,21 +213,49 @@ export default function SimulationPage() {
 
             const options: ScenarioOption[] = Array.isArray(data.options)
               ? data.options
-                  .filter(
-                    (item): item is Record<string, unknown> =>
-                      typeof item === "object" && item !== null,
-                  )
-                  .map((item, index) => ({
-                    id:
-                      typeof item.id === "string"
-                        ? item.id
-                        : String.fromCharCode(97 + index),
+                  .map((item, index): ScenarioOption | null => {
+                    // Firestore option stored as a simple string
+                    if (typeof item === "string") {
+                      return {
+                        id: String.fromCharCode(97 + index), // a, b, c, d...
+                        text: item,
+                      };
+                    }
 
-                    text: typeof item.text === "string" ? item.text : "",
-                  }))
-                  .filter((option) => option.text.trim() !== "")
+                    // Firestore option stored as an object
+                    if (typeof item === "object" && item !== null) {
+                      const option = item as Record<string, unknown>;
+
+                      const id =
+                        typeof option.id === "string"
+                          ? option.id
+                          : typeof option.optionId === "string"
+                            ? option.optionId
+                            : String.fromCharCode(97 + index);
+
+                      const text =
+                        typeof option.text === "string"
+                          ? option.text
+                          : typeof option.label === "string"
+                            ? option.label
+                            : typeof option.value === "string"
+                              ? option.value
+                              : "";
+
+                      if (!text.trim()) {
+                        return null;
+                      }
+
+                      return {
+                        id,
+                        text,
+                      };
+                    }
+
+                    return null;
+                  })
+                  .filter((option): option is ScenarioOption => option !== null)
               : [];
-
             /*
              * ----------------------------------------
              * Scenario

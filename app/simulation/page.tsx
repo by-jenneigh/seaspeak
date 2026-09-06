@@ -27,7 +27,7 @@ type DialogueLine = {
   text: string;
 };
 
-type ScenarioChoice = {
+type ScenarioOption = {
   id: string;
   text: string;
 };
@@ -37,11 +37,24 @@ type Scenario = {
   title: string;
   order: number;
   dialogue: DialogueLine[];
-  choices: ScenarioChoice[];
-  correctAnswer: string;
+
+  // NEW DATA MODEL
+  options: ScenarioOption[];
+  correctOptionId: string;
+
   explanation: string;
   difficulty?: string;
   published?: boolean;
+
+  // Additional fields from the new data model
+  studentRole?: string;
+  communicationChannel?: string;
+  situation?: string;
+  prompt?: string;
+  responseMode?: string;
+  expectedResponse?: string;
+  wrongAnswerEffect?: string;
+  assessment?: unknown;
 };
 
 type Module = {
@@ -62,9 +75,12 @@ export default function SimulationPage() {
   const [module, setModule] = useState<Module | null>(null);
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [currentScenarioIndex, setCurrentScenarioIndex] = useState(0);
+
   const [selectedAnswer, setSelectedAnswer] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
+
   const [cameraEnabled, setCameraEnabled] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -98,6 +114,7 @@ export default function SimulationPage() {
          * modules/{moduleId}
          * ----------------------------------------
          */
+
         const moduleRef = doc(db, "modules", moduleId);
         const moduleSnapshot = await getDoc(moduleRef);
 
@@ -111,22 +128,27 @@ export default function SimulationPage() {
 
         const moduleData: Module = {
           id: moduleSnapshot.id,
+
           title:
             typeof rawModuleData.title === "string"
               ? rawModuleData.title
               : "Untitled Module",
+
           description:
             typeof rawModuleData.description === "string"
               ? rawModuleData.description
               : "",
+
           type:
             typeof rawModuleData.type === "string"
               ? rawModuleData.type
               : undefined,
+
           order:
             typeof rawModuleData.order === "number"
               ? rawModuleData.order
               : undefined,
+
           published:
             typeof rawModuleData.published === "boolean"
               ? rawModuleData.published
@@ -141,6 +163,7 @@ export default function SimulationPage() {
          * modules/{moduleId}/scenarios
          * ----------------------------------------
          */
+
         const scenariosRef = collection(db, "modules", moduleId, "scenarios");
 
         const scenariosSnapshot = await getDocs(scenariosRef);
@@ -150,11 +173,9 @@ export default function SimulationPage() {
             const data = scenarioDoc.data();
 
             /*
-             * IMPORTANT:
-             * Firestore may contain older scenario documents
-             * without choices/dialogue.
-             *
-             * Always normalize those fields to arrays.
+             * ----------------------------------------
+             * Dialogue
+             * ----------------------------------------
              */
 
             const dialogue: DialogueLine[] = Array.isArray(data.dialogue)
@@ -168,12 +189,30 @@ export default function SimulationPage() {
                       typeof item.speaker === "string"
                         ? item.speaker
                         : "Speaker",
+
                     text: typeof item.text === "string" ? item.text : "",
                   }))
               : [];
 
-            const choices: ScenarioChoice[] = Array.isArray(data.choices)
-              ? data.choices
+            /*
+             * ----------------------------------------
+             * OPTIONS
+             *
+             * IMPORTANT:
+             * The new Firestore data model uses:
+             *
+             * options: [...]
+             * correctOptionId: "..."
+             *
+             * NOT:
+             *
+             * choices
+             * correctAnswer
+             * ----------------------------------------
+             */
+
+            const options: ScenarioOption[] = Array.isArray(data.options)
+              ? data.options
                   .filter(
                     (item): item is Record<string, unknown> =>
                       typeof item === "object" && item !== null,
@@ -183,9 +222,17 @@ export default function SimulationPage() {
                       typeof item.id === "string"
                         ? item.id
                         : String.fromCharCode(97 + index),
+
                     text: typeof item.text === "string" ? item.text : "",
                   }))
+                  .filter((option) => option.text.trim() !== "")
               : [];
+
+            /*
+             * ----------------------------------------
+             * Scenario
+             * ----------------------------------------
+             */
 
             return {
               id: scenarioDoc.id,
@@ -199,11 +246,11 @@ export default function SimulationPage() {
 
               dialogue,
 
-              choices,
+              options,
 
-              correctAnswer:
-                typeof data.correctAnswer === "string"
-                  ? data.correctAnswer
+              correctOptionId:
+                typeof data.correctOptionId === "string"
+                  ? data.correctOptionId
                   : "",
 
               explanation:
@@ -218,6 +265,38 @@ export default function SimulationPage() {
                 typeof data.published === "boolean"
                   ? data.published
                   : undefined,
+
+              studentRole:
+                typeof data.studentRole === "string"
+                  ? data.studentRole
+                  : undefined,
+
+              communicationChannel:
+                typeof data.communicationChannel === "string"
+                  ? data.communicationChannel
+                  : undefined,
+
+              situation:
+                typeof data.situation === "string" ? data.situation : undefined,
+
+              prompt: typeof data.prompt === "string" ? data.prompt : undefined,
+
+              responseMode:
+                typeof data.responseMode === "string"
+                  ? data.responseMode
+                  : undefined,
+
+              expectedResponse:
+                typeof data.expectedResponse === "string"
+                  ? data.expectedResponse
+                  : undefined,
+
+              wrongAnswerEffect:
+                typeof data.wrongAnswerEffect === "string"
+                  ? data.wrongAnswerEffect
+                  : undefined,
+
+              assessment: data.assessment,
             };
           },
         );
@@ -226,6 +305,8 @@ export default function SimulationPage() {
          * Sort scenarios by order.
          */
         scenarioData.sort((a, b) => a.order - b.order);
+
+        console.log("Loaded scenarios:", scenarioData);
 
         setScenarios(scenarioData);
 
@@ -455,7 +536,7 @@ export default function SimulationPage() {
               </h1>
 
               <p className="mt-2 text-sm text-slate-500">
-                There are currently no published scenarios for this module.
+                There are currently no scenarios for this module.
               </p>
             </div>
           </main>
@@ -466,9 +547,6 @@ export default function SimulationPage() {
 
   /*
    * Safety guard
-   *
-   * This prevents the page from crashing if the current scenario
-   * somehow becomes unavailable.
    */
   if (!currentScenario) {
     return (
@@ -503,6 +581,11 @@ export default function SimulationPage() {
       </div>
     );
   }
+
+  /*
+   * Determine whether selected option is correct.
+   */
+  const isCorrect = selectedAnswer === currentScenario.correctOptionId;
 
   return (
     <div className="min-h-screen bg-[#f5f8fb]">
@@ -614,12 +697,20 @@ export default function SimulationPage() {
                 </div>
               </section>
 
-              {/* Answers */}
+              {/* Response Options */}
               <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="mb-4">
-                  <h2 className="text-base font-bold text-[#062b4f]">
-                    Your Response
-                  </h2>
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-base font-bold text-[#062b4f]">
+                      Your Response
+                    </h2>
+
+                    {currentScenario.options.length > 0 && (
+                      <span className="rounded-full bg-[#e6f3fb] px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-[#1478bd]">
+                        {currentScenario.options.length} Options
+                      </span>
+                    )}
+                  </div>
 
                   <p className="mt-1 text-xs text-slate-500">
                     Select the best response, then say it out loud.
@@ -627,31 +718,31 @@ export default function SimulationPage() {
                 </div>
 
                 <div className="space-y-3">
-                  {currentScenario.choices.length > 0 ? (
-                    currentScenario.choices.map((choice) => (
+                  {currentScenario.options.length > 0 ? (
+                    currentScenario.options.map((option) => (
                       <AnswerOption
-                        key={choice.id}
-                        letter={choice.id}
-                        text={choice.text}
-                        selected={selectedAnswer === choice.id}
+                        key={option.id}
+                        letter={option.id}
+                        text={option.text}
+                        selected={selectedAnswer === option.id}
                         submitted={submitted}
-                        correct={choice.id === currentScenario.correctAnswer}
+                        correct={option.id === currentScenario.correctOptionId}
                         onClick={() => {
                           if (!submitted) {
-                            setSelectedAnswer(choice.id);
+                            setSelectedAnswer(option.id);
                           }
                         }}
                       />
                     ))
                   ) : (
-                    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-5 text-center">
-                      <p className="text-sm font-semibold text-slate-600">
-                        No response choices available.
+                    <div className="rounded-lg border border-dashed border-red-200 bg-red-50 p-5 text-center">
+                      <p className="text-sm font-semibold text-red-600">
+                        No response options found.
                       </p>
 
-                      <p className="mt-1 text-xs text-slate-400">
-                        Please add a choices array to this scenario in
-                        Firestore.
+                      <p className="mt-1 text-xs text-red-400">
+                        This scenario does not contain an{" "}
+                        <strong>options</strong> array in Firestore.
                       </p>
                     </div>
                   )}
@@ -663,7 +754,7 @@ export default function SimulationPage() {
                 <div className="mb-5 flex items-center justify-between">
                   <div>
                     <h2 className="text-base font-bold text-[#062b4f]">
-                      Your Response
+                      Verbal Response
                     </h2>
 
                     <p className="mt-1 text-xs text-slate-500">
@@ -681,7 +772,6 @@ export default function SimulationPage() {
                     }`}
                   >
                     <Video size={15} />
-
                     {cameraEnabled ? "Camera On" : "Enable Camera"}
                   </button>
                 </div>
@@ -761,7 +851,7 @@ export default function SimulationPage() {
                         onClick={handleSubmit}
                         disabled={
                           !selectedAnswer ||
-                          currentScenario.choices.length === 0
+                          currentScenario.options.length === 0
                         }
                         className="flex items-center gap-2 rounded-lg bg-[#0b4778] px-5 py-3 text-xs font-bold text-white shadow-sm transition hover:bg-[#062b4f] disabled:cursor-not-allowed disabled:opacity-40"
                       >
@@ -787,7 +877,7 @@ export default function SimulationPage() {
               {submitted && (
                 <section
                   className={`rounded-xl border p-6 shadow-sm ${
-                    selectedAnswer === currentScenario.correctAnswer
+                    isCorrect
                       ? "border-green-200 bg-green-50"
                       : "border-red-200 bg-red-50"
                   }`}
@@ -795,35 +885,34 @@ export default function SimulationPage() {
                   <div className="flex items-start gap-4">
                     <div
                       className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
-                        selectedAnswer === currentScenario.correctAnswer
+                        isCorrect
                           ? "bg-green-100 text-green-600"
                           : "bg-red-100 text-red-600"
                       }`}
                     >
-                      {selectedAnswer === currentScenario.correctAnswer ? (
-                        <Check size={20} />
-                      ) : (
-                        <Info size={20} />
-                      )}
+                      {isCorrect ? <Check size={20} /> : <Info size={20} />}
                     </div>
 
                     <div>
                       <h2
                         className={`text-base font-bold ${
-                          selectedAnswer === currentScenario.correctAnswer
-                            ? "text-green-700"
-                            : "text-red-700"
+                          isCorrect ? "text-green-700" : "text-red-700"
                         }`}
                       >
-                        {selectedAnswer === currentScenario.correctAnswer
-                          ? "Correct!"
-                          : "Incorrect"}
+                        {isCorrect ? "Correct!" : "Incorrect"}
                       </h2>
 
                       <p className="mt-2 text-xs leading-5 text-slate-600">
                         {currentScenario.explanation ||
                           "No explanation is available for this scenario."}
                       </p>
+
+                      {!isCorrect && currentScenario.correctOptionId && (
+                        <p className="mt-3 text-xs font-semibold text-red-600">
+                          Correct answer:{" "}
+                          {currentScenario.correctOptionId.toUpperCase()}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </section>
@@ -848,6 +937,27 @@ export default function SimulationPage() {
                     value={currentScenario.difficulty || "Beginner"}
                   />
 
+                  {currentScenario.studentRole && (
+                    <InfoRow
+                      label="Your Role"
+                      value={currentScenario.studentRole}
+                    />
+                  )}
+
+                  {currentScenario.communicationChannel && (
+                    <InfoRow
+                      label="Channel"
+                      value={currentScenario.communicationChannel}
+                    />
+                  )}
+
+                  {currentScenario.responseMode && (
+                    <InfoRow
+                      label="Response Mode"
+                      value={currentScenario.responseMode}
+                    />
+                  )}
+
                   <div>
                     <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                       Description
@@ -857,6 +967,18 @@ export default function SimulationPage() {
                       {module.description || "No module description available."}
                     </p>
                   </div>
+
+                  {currentScenario.situation && (
+                    <div>
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                        Situation
+                      </p>
+
+                      <p className="mt-1 text-xs leading-5 text-slate-500">
+                        {currentScenario.situation}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
 

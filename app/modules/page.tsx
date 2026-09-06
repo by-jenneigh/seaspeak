@@ -19,6 +19,7 @@ import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import { useAuth } from "@/components/AuthProvider";
 import { db } from "@/lib/firebase";
+
 import type { Module } from "@/lib/types";
 
 const moduleIcons = {
@@ -61,7 +62,7 @@ export default function ModulesPage() {
 
         const snapshot = await getDocs(modulesQuery);
 
-        const data = snapshot.docs.map((doc) => ({
+        const data: Module[] = snapshot.docs.map((doc) => ({
           id: doc.id,
           ...doc.data(),
         })) as Module[];
@@ -69,6 +70,7 @@ export default function ModulesPage() {
         setModules(data);
       } catch (error) {
         console.error("Error loading modules:", error);
+        setModules([]);
       } finally {
         setLoading(false);
       }
@@ -100,8 +102,17 @@ export default function ModulesPage() {
             </p>
           </div>
 
-          {/* Loading */}
-          {loading && (
+          {/* Authentication Loading */}
+          {authLoading && (
+            <div className="rounded-xl border border-slate-200 bg-white p-10 text-center">
+              <p className="text-sm text-slate-500">
+                Checking authentication...
+              </p>
+            </div>
+          )}
+
+          {/* Data Loading */}
+          {!authLoading && loading && (
             <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
               {[1, 2, 3].map((item) => (
                 <div
@@ -124,8 +135,30 @@ export default function ModulesPage() {
             </div>
           )}
 
+          {/* Not authenticated */}
+          {!authLoading && !user && (
+            <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
+              <BookOpen size={32} className="mx-auto text-slate-300" />
+
+              <h3 className="mt-3 font-semibold text-[#062b4f]">
+                Please log in
+              </h3>
+
+              <p className="mt-1 text-sm text-slate-500">
+                You need to be logged in to access the learning modules.
+              </p>
+
+              <Link
+                href="/login"
+                className="mt-5 inline-flex rounded-lg bg-[#0b4778] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#062b4f]"
+              >
+                Go to Login
+              </Link>
+            </div>
+          )}
+
           {/* Modules */}
-          {!loading && modules.length > 0 && (
+          {!authLoading && user && !loading && modules.length > 0 && (
             <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
               {modules.map((module, index) => {
                 const Icon =
@@ -133,7 +166,9 @@ export default function ModulesPage() {
 
                 const moduleNumber = String(index + 1).padStart(2, "0");
 
-                // Temporary until student progress is implemented
+                // TODO:
+                // Replace this with actual student progress
+                // from Firestore later.
                 const progress = 0;
 
                 return (
@@ -211,7 +246,7 @@ export default function ModulesPage() {
           )}
 
           {/* Empty State */}
-          {!loading && modules.length === 0 && (
+          {!authLoading && user && !loading && modules.length === 0 && (
             <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
               <BookOpen size={32} className="mx-auto text-slate-300" />
 

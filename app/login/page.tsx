@@ -1,10 +1,11 @@
 "use client";
 
 import { Eye, LockKeyhole, Mail, Waves } from "lucide-react";
+
 import Link from "next/link";
 import Image from "next/image";
 import { useState } from "react";
-import { loginUser } from "@/lib/auth";
+import { loginUser, loginWithGoogle } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
@@ -14,6 +15,54 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+
+    setError("");
+    setLoading(true);
+
+    try {
+      await loginUser(email, password);
+      router.push("/");
+    } catch (error) {
+      console.error("Login error:", error);
+      setError("Invalid email or password.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setError("");
+    setGoogleLoading(true);
+
+    try {
+      await loginWithGoogle();
+      router.push("/");
+    } catch (error: any) {
+      console.error("Google login error:", error);
+
+      if (error?.code === "auth/popup-closed-by-user") {
+        setError("Google sign-in was cancelled.");
+      } else if (error?.code === "auth/popup-blocked") {
+        setError(
+          "The Google sign-in popup was blocked. Please allow popups for SEASPEAK.",
+        );
+      } else if (
+        error?.code === "auth/account-exists-with-different-credential"
+      ) {
+        setError(
+          "An account already exists with this email using a different sign-in method.",
+        );
+      } else {
+        setError("Unable to sign in with Google. Please try again.");
+      }
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-[#f4f8fb] p-5">
@@ -65,23 +114,7 @@ export default function LoginPage() {
               </p>
             </div>
 
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-
-                setError("");
-                setLoading(true);
-
-                try {
-                  await loginUser(email, password);
-                  router.push("/");
-                } catch (error) {
-                  setError("Invalid email or password.");
-                } finally {
-                  setLoading(false);
-                }
-              }}
-            >
+            <form onSubmit={handleLogin}>
               {/* Email */}
               <div>
                 <label className="mb-2 block text-sm font-semibold text-[#062b4f]">
@@ -99,6 +132,8 @@ export default function LoginPage() {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="Enter your email"
+                    required
+                    autoComplete="email"
                     className="h-12 w-full rounded-lg border border-slate-300 bg-white pl-10 pr-4 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-[#1478bd] focus:ring-2 focus:ring-[#1478bd]/20"
                   />
                 </div>
@@ -121,13 +156,19 @@ export default function LoginPage() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Enter your password"
+                    required
+                    autoComplete="current-password"
                     className="h-12 w-full rounded-lg border border-slate-300 bg-white pl-10 pr-4 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-[#1478bd] focus:ring-2 focus:ring-[#1478bd]/20"
                   />
                 </div>
               </div>
 
               {/* Error */}
-              {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
+              {error && (
+                <div className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {error}
+                </div>
+              )}
 
               {/* Remember / Forgot */}
               <div className="mt-5 flex items-center justify-between text-xs">
@@ -150,24 +191,42 @@ export default function LoginPage() {
               {/* Submit */}
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || googleLoading}
                 className="mt-6 flex h-12 w-full items-center justify-center rounded-lg bg-[#0b4778] text-sm font-semibold text-white shadow-md transition hover:bg-[#062b4f] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {loading ? "Logging in..." : "Login"}
               </button>
             </form>
 
+            {/* Divider */}
             <div className="my-7 flex items-center gap-4">
               <div className="h-px flex-1 bg-slate-200" />
+
               <span className="text-xs text-slate-400">or</span>
+
               <div className="h-px flex-1 bg-slate-200" />
             </div>
 
-            <button className="flex h-12 w-full items-center justify-center gap-3 rounded-lg border border-slate-300 bg-white text-sm font-semibold text-slate-700 hover:bg-slate-50">
-              <span className="text-base font-bold">G</span>
-              Continue with Google
+            {/* Google Login */}
+            <button
+              type="button"
+              onClick={handleGoogleLogin}
+              disabled={loading || googleLoading}
+              className="flex h-12 w-full items-center justify-center gap-3 rounded-lg border border-slate-300 bg-white text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {googleLoading ? (
+                "Signing in with Google..."
+              ) : (
+                <>
+                  <span className="flex h-5 w-5 items-center justify-center text-base font-bold">
+                    G
+                  </span>
+                  Continue with Google
+                </>
+              )}
             </button>
 
+            {/* Register */}
             <p className="mt-8 text-center text-sm text-slate-500">
               Don&apos;t have an account?{" "}
               <Link

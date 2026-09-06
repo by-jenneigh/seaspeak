@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import {
   ArrowLeft,
@@ -88,6 +88,8 @@ function SimulationPageContent() {
 
   const { user, loading: authLoading } = useAuth();
 
+  const router = useRouter();
+
   const [module, setModule] = useState<Module | null>(null);
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [currentScenarioIndex, setCurrentScenarioIndex] = useState(0);
@@ -134,6 +136,12 @@ function SimulationPageContent() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!authLoading && !moduleId) {
+      router.replace("/modules");
+    }
+  }, [authLoading, moduleId, router]);
 
   /*
    * Load available browser voices.
@@ -366,6 +374,10 @@ function SimulationPageContent() {
     }
 
     async function loadSimulation() {
+      if (!moduleId) {
+        return;
+      }
+
       if (authLoading) return;
 
       if (!user) {

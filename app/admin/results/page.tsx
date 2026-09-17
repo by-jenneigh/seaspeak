@@ -8,6 +8,8 @@ import {
   CalendarDays,
   Filter,
   RefreshCw,
+  Search,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -64,8 +66,11 @@ export default function AdminResultsPage() {
   const [authorized, setAuthorized] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
   const [results, setResults] = useState<ResultRecord[]>([]);
 
+  // Filters
+  const [studentSearch, setStudentSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -81,8 +86,7 @@ export default function AdminResultsPage() {
 
     try {
       /*
-       * Verify that the currently authenticated user
-       * has an admin role.
+       * Verify that the authenticated user is an admin.
        */
       const currentUser = await getDoc(doc(db, "users", user.uid));
 
@@ -94,7 +98,7 @@ export default function AdminResultsPage() {
       setAuthorized(true);
 
       /*
-       * Admins can load all completed results.
+       * Admins can read all results.
        */
       const snap = await getDocs(collection(db, "results"));
 
@@ -152,7 +156,7 @@ export default function AdminResultsPage() {
       });
 
       /*
-       * Sort newest submissions first.
+       * Newest results first.
        */
       loaded.sort(
         (a, b) =>
@@ -183,12 +187,12 @@ export default function AdminResultsPage() {
 
     void loadResults();
 
-    // loadResults intentionally depends on the current authenticated user.
+    // loadResults intentionally uses the current authenticated user.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, user]);
 
   /*
-   * Build the module filter list from the loaded results.
+   * Build unique module list.
    */
   const modules = useMemo(() => {
     const map = new Map<string, string>();
@@ -203,26 +207,56 @@ export default function AdminResultsPage() {
   }, [results]);
 
   /*
-   * Apply module and date filters.
+   * Apply all filters.
+   *
+   * Student search matches either:
+   * - student name
+   * - student email
    */
   const filtered = useMemo(() => {
     const from = fromDate ? new Date(`${fromDate}T00:00:00`) : null;
 
     const to = toDate ? new Date(`${toDate}T23:59:59.999`) : null;
 
+    const search = studentSearch.trim().toLowerCase();
+
     return results.filter((result) => {
-      const completed = result.completedAt?.toDate() ?? null;
+      const studentMatches =
+        !search ||
+        result.userName.toLowerCase().includes(search) ||
+        result.userEmail.toLowerCase().includes(search);
 
       const moduleMatches =
         moduleFilter === "all" || result.moduleId === moduleFilter;
+
+      const completed = result.completedAt?.toDate() ?? null;
 
       const fromMatches = !from || !completed || completed >= from;
 
       const toMatches = !to || !completed || completed <= to;
 
-      return moduleMatches && fromMatches && toMatches;
+      return studentMatches && moduleMatches && fromMatches && toMatches;
     });
-  }, [results, moduleFilter, fromDate, toDate]);
+  }, [results, studentSearch, moduleFilter, fromDate, toDate]);
+
+  /*
+   * Determine whether a filter is active.
+   */
+  const hasActiveFilters =
+    studentSearch.trim() !== "" ||
+    moduleFilter !== "all" ||
+    fromDate !== "" ||
+    toDate !== "";
+
+  /*
+   * Clear all filters.
+   */
+  function clearFilters() {
+    setStudentSearch("");
+    setModuleFilter("all");
+    setFromDate("");
+    setToDate("");
+  }
 
   /*
    * Summary metrics.
@@ -281,7 +315,7 @@ export default function AdminResultsPage() {
   }, [filtered]);
 
   /*
-   * Score distribution for the pie chart.
+   * Score distribution.
    */
   const scoreDistribution = useMemo(() => {
     const buckets = [
@@ -314,6 +348,7 @@ export default function AdminResultsPage() {
 
     return buckets.map((bucket) => ({
       name: bucket.name,
+
       value: filtered.filter(
         (item) => item.score >= bucket.min && item.score <= bucket.max,
       ).length,
@@ -415,12 +450,55 @@ export default function AdminResultsPage() {
 
       {/* Filters */}
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center gap-2 text-sm font-bold text-[#062b4f]">
-          <Filter size={16} className="text-[#1478bd]" />
-          Filters
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-[#062b4f]">
+            <Filter size={16} className="text-[#1478bd]" />
+            Filters
+          </div>
+
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-[#1478bd]"
+            >
+              <X size={14} />
+              Clear Filters
+            </button>
+          )}
         </div>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-3">
+        <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          {/* Student Search */}
+          <label className="text-xs font-semibold text-slate-600 lg:col-span-2">
+            Search Student
+            <div className="relative mt-2">
+              <Search
+                size={15}
+                className="absolute left-3 top-3 text-slate-400"
+              />
+
+              <input
+                type="text"
+                value={studentSearch}
+                onChange={(event) => setStudentSearch(event.target.value)}
+                placeholder="Search by name or email..."
+                className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-xs font-normal text-slate-700 outline-none placeholder:text-slate-400 focus:border-[#168dcc]"
+              />
+
+              {studentSearch && (
+                <button
+                  type="button"
+                  onClick={() => setStudentSearch("")}
+                  className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600"
+                  aria-label="Clear student search"
+                >
+                  <X size={15} />
+                </button>
+              )}
+            </div>
+          </label>
+
           {/* Module */}
           <label className="text-xs font-semibold text-slate-600">
             Module
@@ -439,7 +517,7 @@ export default function AdminResultsPage() {
             </select>
           </label>
 
-          {/* From date */}
+          {/* From Date */}
           <label className="text-xs font-semibold text-slate-600">
             From date
             <div className="relative mt-2">
@@ -456,8 +534,10 @@ export default function AdminResultsPage() {
               />
             </div>
           </label>
+        </div>
 
-          {/* To date */}
+        {/* To Date */}
+        <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <label className="text-xs font-semibold text-slate-600">
             To date
             <div className="relative mt-2">
@@ -477,8 +557,22 @@ export default function AdminResultsPage() {
         </div>
       </section>
 
+      {/* Search Status */}
+      {studentSearch.trim() !== "" && (
+        <div className="mt-5 rounded-xl border border-[#c8e3f5] bg-[#e6f3fb] px-5 py-4">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-[#1478bd]">
+            Student Search
+          </p>
+
+          <p className="mt-1 text-sm text-[#062b4f]">
+            Showing results matching{" "}
+            <span className="font-bold">"{studentSearch.trim()}"</span>
+          </p>
+        </div>
+      )}
+
       {/* Metrics */}
-      <div className="mt-5 grid gap-4 md:grid-cols-4">
+      <div className="mt-5 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Metric label="Submissions" value={filtered.length} />
 
         <Metric label="Average Score" value={`${averageScore}%`} />
@@ -488,9 +582,9 @@ export default function AdminResultsPage() {
         <Metric label="Average Phraseology" value={`${averagePhraseology}%`} />
       </div>
 
-      {/* Main Charts */}
+      {/* Charts */}
       <div className="mt-5 grid gap-5 lg:grid-cols-2">
-        {/* Average score by module */}
+        {/* Average Score by Module */}
         <ChartCard title="Average Score by Module">
           {moduleChart.length === 0 ? (
             <Empty />
@@ -549,7 +643,7 @@ export default function AdminResultsPage() {
           )}
         </ChartCard>
 
-        {/* Score distribution */}
+        {/* Score Distribution */}
         <ChartCard title="Score Distribution">
           {filtered.length === 0 ? (
             <Empty />
@@ -684,12 +778,19 @@ export default function AdminResultsPage() {
 
       {/* Completed Results */}
       <section className="mt-5 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center gap-2">
-          <BarChart3 size={17} className="text-[#1478bd]" />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <BarChart3 size={17} className="text-[#1478bd]" />
 
-          <h2 className="text-base font-bold text-[#062b4f]">
-            Completed Results
-          </h2>
+            <h2 className="text-base font-bold text-[#062b4f]">
+              Completed Results
+            </h2>
+          </div>
+
+          <p className="text-[11px] text-slate-400">
+            Showing {filtered.length} result
+            {filtered.length === 1 ? "" : "s"}
+          </p>
         </div>
 
         <div className="mt-4 overflow-x-auto">

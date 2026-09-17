@@ -10,7 +10,9 @@ export async function POST(request: Request) {
     if (!GROQ_API_KEY) {
       return NextResponse.json(
         {
-          error: "GROQ_API_KEY is not configured.",
+          success: false,
+          error:
+            "Speech transcription is not configured. Please contact your administrator.",
         },
         { status: 500 },
       );
@@ -19,7 +21,9 @@ export async function POST(request: Request) {
     if (!GEMINI_API_KEY) {
       return NextResponse.json(
         {
-          error: "GEMINI_API_KEY is not configured.",
+          success: false,
+          error:
+            "AI evaluation is not configured. Please contact your administrator.",
         },
         { status: 500 },
       );
@@ -33,7 +37,9 @@ export async function POST(request: Request) {
     if (!(audio instanceof File)) {
       return NextResponse.json(
         {
-          error: "No audio file was provided.",
+          success: false,
+          error:
+            "No audio recording was provided. Please record your response and try again.",
         },
         { status: 400 },
       );
@@ -42,7 +48,9 @@ export async function POST(request: Request) {
     if (audio.size === 0) {
       return NextResponse.json(
         {
-          error: "The audio file is empty.",
+          success: false,
+          error:
+            "The audio recording is empty. Please record your response again.",
         },
         { status: 400 },
       );
@@ -110,7 +118,7 @@ export async function POST(request: Request) {
     );
 
     /*
-     * Your current application is English-language training.
+     * Your application is English-language training.
      * Explicitly specifying English improves transcription accuracy.
      */
     groqFormData.append("language", "en");
@@ -133,8 +141,9 @@ export async function POST(request: Request) {
 
       return NextResponse.json(
         {
-          error: "Speech transcription failed.",
-          details: errorText,
+          success: false,
+          error:
+            "Speech transcription is temporarily unavailable. Please try recording your response again.",
         },
         { status: 502 },
       );
@@ -148,6 +157,7 @@ export async function POST(request: Request) {
     if (!transcript) {
       return NextResponse.json(
         {
+          success: false,
           error:
             "No speech could be detected in the recording. Please speak clearly and try again.",
         },
@@ -170,6 +180,7 @@ Your task is to evaluate the student's spoken response to a maritime
 communication scenario.
 
 IMPORTANT:
+
 - Evaluate the student's actual spoken response.
 - Do not reward an answer simply because it contains some of the same
   words as the expected answer.
@@ -223,22 +234,28 @@ Phraseology:
 Consider:
 
 1. Correctness
+
 Does the student communicate the required response?
 
 2. Maritime phraseology
+
 Does the student use appropriate SMCP/maritime terminology?
 
 3. Clarity
+
 Would another crew member understand the message immediately?
 
 4. Completeness
+
 Does the response provide the necessary operational information?
 
 5. Safety
+
 Could the wording create ambiguity or misunderstanding during an
 actual maritime operation?
 
 6. Professionalism
+
 Is the communication concise, standardized and professional?
 
 FEEDBACK
@@ -246,9 +263,11 @@ FEEDBACK
 Give concise feedback suitable for a maritime student.
 
 If the answer is good:
+
 - explain what was done correctly.
 
 If the answer needs improvement:
+
 - identify the specific problem.
 - give the student a better example response.
 
@@ -310,15 +329,83 @@ Return ONLY valid JSON matching the requested schema.
       },
     );
 
+    /*
+     * ============================================================
+     * GEMINI ERROR HANDLING
+     * ============================================================
+     */
+
     if (!geminiResponse.ok) {
       const errorText = await geminiResponse.text();
 
-      console.error("Gemini evaluation error:", errorText);
+      console.error(
+        `Gemini evaluation error (${geminiResponse.status}):`,
+        errorText,
+      );
 
+      /*
+       * 429 = quota/rate-limit problem.
+       *
+       * This is different from a normal AI failure, so return a
+       * student-friendly message and preserve the transcript.
+       */
+      if (geminiResponse.status === 429) {
+        let retryAfterSeconds: number | null = null;
+
+        const retryAfterHeader = geminiResponse.headers.get("Retry-After");
+
+        if (retryAfterHeader) {
+          const parsedRetryAfter = Number(retryAfterHeader);
+
+          if (Number.isFinite(parsedRetryAfter) && parsedRetryAfter > 0) {
+            retryAfterSeconds = Math.ceil(parsedRetryAfter);
+          }
+        }
+
+        /*
+         * Google sometimes puts the retry delay inside the JSON
+         * error body instead of the HTTP Retry-After header.
+         */
+        if (retryAfterSeconds === null) {
+          const retryMatch = errorText.match(
+            /retryDelay["']?\s*:\s*["']?(\d+(?:\.\d+)?)s/i,
+          );
+
+          if (retryMatch) {
+            retryAfterSeconds = Math.ceil(Number(retryMatch[1]));
+          }
+        }
+
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "AI evaluation is temporarily unavailable because the Gemini API usage limit has been reached. Your recording was received, but it could not be evaluated right now. Please try again later.",
+            code: "AI_QUOTA_EXCEEDED",
+            transcript,
+            retryAfterSeconds,
+          },
+          {
+            status: 429,
+            headers:
+              retryAfterSeconds !== null
+                ? {
+                    "Retry-After": String(retryAfterSeconds),
+                  }
+                : undefined,
+          },
+        );
+      }
+
+      /*
+       * Other Gemini errors.
+       */
       return NextResponse.json(
         {
-          error: "AI evaluation failed.",
-          details: errorText,
+          success: false,
+          error:
+            "The AI evaluator could not complete the assessment. Please try again.",
+          code: "AI_EVALUATION_FAILED",
           transcript,
         },
         { status: 502 },
@@ -333,14 +420,21 @@ Return ONLY valid JSON matching the requested schema.
     if (!responseText) {
       return NextResponse.json(
         {
-          error: "Gemini returned an empty evaluation.",
+          success: false,
+          error: "The AI evaluator returned no assessment. Please try again.",
+          code: "AI_EMPTY_RESPONSE",
           transcript,
         },
         { status: 502 },
       );
     }
 
-    let evaluation;
+    let evaluation: {
+      score: number;
+      clarity: number;
+      phraseology: number;
+      feedback: string;
+    };
 
     try {
       evaluation = JSON.parse(responseText);
@@ -349,7 +443,10 @@ Return ONLY valid JSON matching the requested schema.
 
       return NextResponse.json(
         {
-          error: "Gemini returned invalid evaluation data.",
+          success: false,
+          error:
+            "The AI evaluator returned an invalid assessment. Please try again.",
+          code: "AI_INVALID_RESPONSE",
           transcript,
         },
         { status: 502 },
@@ -365,9 +462,7 @@ Return ONLY valid JSON matching the requested schema.
 
     return NextResponse.json({
       success: true,
-
       transcript,
-
       score: evaluation.score,
       clarity: evaluation.clarity,
       phraseology: evaluation.phraseology,
@@ -378,8 +473,10 @@ Return ONLY valid JSON matching the requested schema.
 
     return NextResponse.json(
       {
-        error: "Unexpected error while evaluating the recording.",
-        details: error instanceof Error ? error.message : "Unknown error",
+        success: false,
+        error:
+          "Something went wrong while processing your recording. Please try again.",
+        code: "AI_EVALUATION_UNEXPECTED_ERROR",
       },
       { status: 500 },
     );

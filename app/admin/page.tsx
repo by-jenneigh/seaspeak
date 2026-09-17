@@ -36,6 +36,7 @@ type ResultRecord = {
 export default function AdminDashboardPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
+
   const [authorized, setAuthorized] = useState(false);
   const [loading, setLoading] = useState(true);
   const [results, setResults] = useState<ResultRecord[]>([]);
@@ -49,9 +50,14 @@ export default function AdminDashboardPage() {
       return;
     }
 
+    // Capture the authenticated user after the null check.
+    // This allows TypeScript to safely use the user inside
+    // the async function below.
+    const currentUserAuth = user;
+
     async function loadDashboard() {
       try {
-        const currentUser = await getDoc(doc(db, "users", user.uid));
+        const currentUser = await getDoc(doc(db, "users", currentUserAuth.uid));
 
         if (currentUser.data()?.role !== "admin") {
           router.replace("/");
@@ -61,9 +67,11 @@ export default function AdminDashboardPage() {
         setAuthorized(true);
 
         const resultsSnap = await getDocs(collection(db, "results"));
+
         setResults(
           resultsSnap.docs.map((item) => {
             const data = item.data();
+
             return {
               userId: data.userId || "",
               userName: data.userName || "Student",
@@ -77,6 +85,7 @@ export default function AdminDashboardPage() {
         );
       } catch (err) {
         console.error("Admin dashboard error:", err);
+
         setError(
           "Unable to load admin data. Check your Firestore rules and admin role.",
         );
@@ -101,17 +110,20 @@ export default function AdminDashboardPage() {
   if (!authorized) return null;
 
   const uniqueStudents = new Set(results.map((result) => result.userId)).size;
+
   const averageScore = results.length
     ? Math.round(
         results.reduce((sum, result) => sum + result.score, 0) / results.length,
       )
     : 0;
+
   const averageAccuracy = results.length
     ? Math.round(
         results.reduce((sum, result) => sum + result.accuracy, 0) /
           results.length,
       )
     : 0;
+
   const recent = [...results]
     .sort(
       (a, b) =>
@@ -125,9 +137,11 @@ export default function AdminDashboardPage() {
         <p className="text-xs font-bold uppercase tracking-wider text-[#1478bd]">
           Administration
         </p>
+
         <h1 className="mt-1 text-2xl font-bold text-[#062b4f]">
           SEASPEAK Admin Dashboard
         </h1>
+
         <p className="mt-1 text-sm text-slate-500">
           Monitor completed module results and student performance.
         </p>
@@ -145,16 +159,19 @@ export default function AdminDashboardPage() {
           label="Students"
           value={uniqueStudents}
         />
+
         <StatCard
           icon={<BookOpen size={19} />}
           label="Submissions"
           value={results.length}
         />
+
         <StatCard
           icon={<BarChart3 size={19} />}
           label="Average Score"
           value={`${averageScore}%`}
         />
+
         <StatCard
           icon={<ShieldCheck size={19} />}
           label="Average Accuracy"
@@ -169,10 +186,12 @@ export default function AdminDashboardPage() {
               <h2 className="text-base font-bold text-[#062b4f]">
                 Recent Submissions
               </h2>
+
               <p className="mt-1 text-xs text-slate-400">
                 Latest completed module results.
               </p>
             </div>
+
             <Link
               href="/admin/results"
               className="flex items-center gap-1 text-xs font-semibold text-[#1478bd] hover:underline"
@@ -192,6 +211,7 @@ export default function AdminDashboardPage() {
                   <th className="px-3 py-3">Submitted</th>
                 </tr>
               </thead>
+
               <tbody>
                 {recent.map((result, index) => (
                   <tr
@@ -201,20 +221,25 @@ export default function AdminDashboardPage() {
                     <td className="px-3 py-3 font-semibold text-[#173b5e]">
                       {result.userName}
                     </td>
+
                     <td className="px-3 py-3 text-slate-600">
                       {result.moduleTitle}
                     </td>
+
                     <td className="px-3 py-3 font-bold text-[#1478bd]">
                       {result.score}%
                     </td>
+
                     <td className="px-3 py-3 text-slate-600">
                       {result.accuracy}%
                     </td>
+
                     <td className="px-3 py-3 text-slate-500">
                       {formatDate(result.completedAt)}
                     </td>
                   </tr>
                 ))}
+
                 {recent.length === 0 && (
                   <tr>
                     <td
@@ -232,10 +257,12 @@ export default function AdminDashboardPage() {
 
         <section className="rounded-xl border border-[#c8e3f5] bg-[#e6f3fb] p-6">
           <h2 className="text-base font-bold text-[#062b4f]">Reports</h2>
+
           <p className="mt-1 text-xs leading-5 text-slate-600">
             Filter submissions by date and module, then review performance
             graphs and individual results.
           </p>
+
           <Link
             href="/admin/results"
             className="mt-5 inline-flex items-center gap-2 rounded-lg bg-[#0b4778] px-4 py-3 text-xs font-semibold text-white transition hover:bg-[#062b4f]"
@@ -252,8 +279,10 @@ function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-[#f5f8fb]">
       <Sidebar />
+
       <div className="ml-[230px] min-h-screen">
         <Topbar />
+
         <main className="p-8">{children}</main>
       </div>
     </div>
@@ -274,9 +303,11 @@ function StatCard({
       <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#e6f3fb] text-[#1478bd]">
         {icon}
       </div>
+
       <p className="mt-4 text-[10px] font-bold uppercase tracking-wider text-slate-400">
         {label}
       </p>
+
       <p className="mt-1 text-2xl font-bold text-[#062b4f]">{value}</p>
     </div>
   );
@@ -284,5 +315,6 @@ function StatCard({
 
 function formatDate(value?: Timestamp) {
   if (!value?.toDate) return "—";
+
   return value.toDate().toLocaleString();
 }

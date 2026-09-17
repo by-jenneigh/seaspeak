@@ -13,9 +13,9 @@ import {
   Play,
   RotateCcw,
   Square,
-  Trophy,
   Video,
   Volume2,
+  Trophy,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
@@ -133,10 +133,21 @@ function SimulationPageContent() {
   );
   const [moduleProgress, setModuleProgress] = useState(0);
 
-  // Phase 1: keep the completed scenario results in the current session
-  // so the module result can be shown when the final scenario is submitted.
+  // Results collected during the current module session.
   const [scenarioResults, setScenarioResults] = useState<ScenarioResult[]>([]);
   const [moduleSubmitted, setModuleSubmitted] = useState(false);
+  const [isSubmittingModule, setIsSubmittingModule] = useState(false);
+  const [moduleResultError, setModuleResultError] = useState("");
+  const [moduleResult, setModuleResult] = useState<{
+    score: number;
+    totalScenarios: number;
+    correctAnswers: number;
+    incorrectAnswers: number;
+    accuracy: number;
+    speechScore: number;
+    clarity: number;
+    phraseology: number;
+  } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -576,6 +587,8 @@ function SimulationPageContent() {
         setSubmitted(false);
         setScenarioResults([]);
         setModuleSubmitted(false);
+        setModuleResult(null);
+        setModuleResultError("");
       } catch (error) {
         console.error("Error loading simulation:", error);
 
@@ -972,9 +985,11 @@ function SimulationPageContent() {
       setAiFeedback(finalFeedback);
       setSubmitted(true);
 
-      // Keep this scenario's result in memory for the module completion report.
+      // Keep the scenario result in memory so the final module submission
+      // can calculate the student's complete module result without changing
+      // the existing per-scenario attempt saving.
       setScenarioResults((previous) => {
-        const result: ScenarioResult = {
+        const nextResult: ScenarioResult = {
           scenarioId: currentScenario.id,
           scenarioTitle: currentScenario.title,
           isCorrect: correct,
@@ -987,13 +1002,13 @@ function SimulationPageContent() {
           (item) => item.scenarioId === currentScenario.id,
         );
 
-        if (existingIndex >= 0) {
-          const updated = [...previous];
-          updated[existingIndex] = result;
-          return updated;
+        if (existingIndex === -1) {
+          return [...previous, nextResult];
         }
 
-        return [...previous, result];
+        const updated = [...previous];
+        updated[existingIndex] = nextResult;
+        return updated;
       });
 
       /*
@@ -1055,6 +1070,133 @@ function SimulationPageContent() {
   }
 
   /*
+   * Submit the completed module.
+   *
+   * This is intentionally separate from handleSubmit(), which submits one
+   * scenario for AI evaluation. The module submission calculates the final
+   * result and writes it to the top-level results collection for the admin
+   * reports.
+   */
+  async function handleSubmitModule() {
+    if (
+      !user ||
+      !moduleId ||
+      !module ||
+      totalScenarios === 0 ||
+      isSubmittingModule
+    ) {
+      return;
+    }
+
+    const completedIds = Array.from(new Set(completedScenarioIds));
+
+    if (completedIds.length < totalScenarios) {
+      setModuleResultError(
+        `Please complete all ${totalScenarios} scenarios before submitting the module.`,
+      );
+      return;
+    }
+
+    try {
+      stopSpeech();
+      setIsSubmittingModule(true);
+      setModuleResultError("");
+
+      // If the student revisited a scenario, keep only its latest result.
+      const resultsByScenario = new Map(
+        scenarioResults.map((result) => [result.scenarioId, result]),
+      );
+
+      const orderedResults = scenarios
+        .map((scenario) => resultsByScenario.get(scenario.id))
+        .filter((result): result is ScenarioResult => Boolean(result));
+
+      const correctAnswers = orderedResults.filter(
+        (result) => result.isCorrect,
+      ).length;
+
+      const incorrectAnswers = totalScenarios - correctAnswers;
+
+      const accuracy = Math.round((correctAnswers / totalScenarios) * 100);
+
+      const average = (values: Array<number | null>) => {
+        const validValues = values.filter(
+          (value): value is number =>
+            typeof value === "number" && Number.isFinite(value),
+        );
+
+        if (validValues.length === 0) return 0;
+
+        return Math.round(
+          validValues.reduce((sum, value) => sum + value, 0) /
+            validValues.length,
+        );
+      };
+
+      const speechScore = average(orderedResults.map((result) => result.score));
+      const clarity = average(orderedResults.map((result) => result.clarity));
+      const phraseology = average(
+        orderedResults.map((result) => result.phraseology),
+      );
+
+      // Overall module score combines answer accuracy with the AI speech
+      // evaluation when speech scores are available. If no AI score exists,
+      // accuracy remains the overall score.
+      const overallScore = orderedResults.some(
+        (result) => typeof result.score === "number",
+      )
+        ? Math.round((accuracy + speechScore) / 2)
+        : accuracy;
+
+      const resultData = {
+        userId: user.uid,
+        userName: user.displayName || user.email?.split("@")[0] || "Student",
+        userEmail: user.email || "",
+        moduleId,
+        moduleTitle: module.title,
+        score: overallScore,
+        totalScenarios,
+        correctAnswers,
+        incorrectAnswers,
+        accuracy,
+        speechScore,
+        clarity,
+        phraseology,
+        completedAt: serverTimestamp(),
+      };
+
+      // One deterministic document per student/module prevents duplicate
+      // result documents when the student clicks Submit Module more than once.
+      await setDoc(doc(db, "results", `${user.uid}_${moduleId}`), resultData, {
+        merge: true,
+      });
+
+      setModuleResult({
+        score: overallScore,
+        totalScenarios,
+        correctAnswers,
+        incorrectAnswers,
+        accuracy,
+        speechScore,
+        clarity,
+        phraseology,
+      });
+
+      setModuleSubmitted(true);
+    } catch (err) {
+      console.error("Module submission error:", err);
+
+      setModuleResultError(
+        err instanceof Error
+          ? err.message
+          : "Unable to submit the module result. Please try again.",
+      );
+    } finally {
+      setIsSubmittingModule(false);
+    }
+  }
+
+  /*
    * Move to next scenario.
    */
   function handleNextScenario() {
@@ -1075,8 +1217,6 @@ function SimulationPageContent() {
     setAiClarity(null);
     setAiPhraseology(null);
     setAiFeedback("");
-    aiFeedbackSpeechKeyRef.current = null;
-    incomingSpeechKeyRef.current = null;
     setRecordingSeconds(0);
     setRecordingError("");
 
@@ -1104,8 +1244,6 @@ function SimulationPageContent() {
     setAiClarity(null);
     setAiPhraseology(null);
     setAiFeedback("");
-    aiFeedbackSpeechKeyRef.current = null;
-    incomingSpeechKeyRef.current = null;
     setRecordingSeconds(0);
     setRecordingError("");
 
@@ -1317,49 +1455,6 @@ function SimulationPageContent() {
   const isCorrect = selectedAnswer === currentScenario.correctOptionId;
 
   const isIncomingPlaying = playingSpeechId === "incoming";
-
-  const isLastScenario = currentScenarioIndex === totalScenarios - 1;
-
-  const completedResultsCount = scenarioResults.length;
-
-  const correctAnswers = scenarioResults.filter(
-    (result) => result.isCorrect,
-  ).length;
-
-  const moduleAccuracy =
-    completedResultsCount > 0
-      ? Math.round((correctAnswers / completedResultsCount) * 100)
-      : 0;
-
-  const averageScore =
-    completedResultsCount > 0
-      ? Math.round(
-          scenarioResults.reduce(
-            (sum, result) => sum + (result.score ?? 0),
-            0,
-          ) / completedResultsCount,
-        )
-      : 0;
-
-  const averageClarity =
-    completedResultsCount > 0
-      ? Math.round(
-          scenarioResults.reduce(
-            (sum, result) => sum + (result.clarity ?? 0),
-            0,
-          ) / completedResultsCount,
-        )
-      : 0;
-
-  const averagePhraseology =
-    completedResultsCount > 0
-      ? Math.round(
-          scenarioResults.reduce(
-            (sum, result) => sum + (result.phraseology ?? 0),
-            0,
-          ) / completedResultsCount,
-        )
-      : 0;
 
   return (
     <div className="min-h-screen bg-[#f5f8fb]">
@@ -1820,7 +1915,6 @@ function SimulationPageContent() {
                           )}
                         </div>
                       </div>
-
                       {!isCorrect && currentScenario.correctOptionId && (
                         <p className="mt-3 text-xs font-semibold text-red-600">
                           Correct answer:{" "}
@@ -1957,14 +2051,18 @@ function SimulationPageContent() {
               Scenario {scenarioNumber} of {totalScenarios}
             </span>
 
-            {isLastScenario && submitted ? (
+            {currentScenarioIndex === totalScenarios - 1 && submitted ? (
               <button
                 type="button"
-                onClick={() => setModuleSubmitted(true)}
-                disabled={isAnalyzing}
-                className="flex items-center gap-2 rounded-lg bg-[#168dcc] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0b4778] disabled:cursor-not-allowed disabled:opacity-30"
+                onClick={handleSubmitModule}
+                disabled={isSubmittingModule || moduleSubmitted}
+                className="flex items-center gap-2 rounded-lg bg-[#168dcc] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0b4778] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Submit Module
+                {isSubmittingModule
+                  ? "Submitting..."
+                  : moduleSubmitted
+                    ? "Module Submitted"
+                    : "Submit Module"}
                 <Trophy size={15} />
               </button>
             ) : (
@@ -1983,85 +2081,95 @@ function SimulationPageContent() {
               </button>
             )}
           </div>
+
+          {moduleResultError && (
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-600">
+              {moduleResultError}
+            </div>
+          )}
+
+          {moduleSubmitted && moduleResult && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#062b4f]/50 p-4 backdrop-blur-sm">
+              <div className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-7 shadow-2xl">
+                <div className="text-center">
+                  <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#e6f3fb] text-[#168dcc]">
+                    <Trophy size={26} />
+                  </div>
+
+                  <p className="mt-4 text-[10px] font-bold uppercase tracking-[0.18em] text-[#1478bd]">
+                    Module Submitted
+                  </p>
+
+                  <h2 className="mt-1 text-2xl font-bold text-[#062b4f]">
+                    Module Complete!
+                  </h2>
+
+                  <p className="mt-2 text-sm text-slate-500">
+                    Your final module result has been saved successfully.
+                  </p>
+                </div>
+
+                <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <ScoreCard label="Overall" value={moduleResult.score} />
+                  <ScoreCard label="Accuracy" value={moduleResult.accuracy} />
+                  <ScoreCard label="Clarity" value={moduleResult.clarity} />
+                  <ScoreCard
+                    label="Phraseology"
+                    value={moduleResult.phraseology}
+                  />
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-green-600">
+                      Correct
+                    </p>
+                    <p className="mt-1 text-xl font-bold text-green-700">
+                      {moduleResult.correctAnswers}
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-red-600">
+                      Incorrect
+                    </p>
+                    <p className="mt-1 text-xl font-bold text-red-700">
+                      {moduleResult.incorrectAnswers}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Speech Score
+                  </p>
+                  <p className="mt-1 text-lg font-bold text-[#0b4778]">
+                    {moduleResult.speechScore}%
+                  </p>
+                </div>
+
+                <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-center">
+                  <button
+                    type="button"
+                    onClick={() => router.push("/modules")}
+                    className="rounded-lg bg-[#0b4778] px-5 py-3 text-xs font-bold text-white transition hover:bg-[#062b4f]"
+                  >
+                    Back to Modules
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setModuleSubmitted(false)}
+                    className="rounded-lg border border-slate-200 px-5 py-3 text-xs font-bold text-[#0b4778] transition hover:bg-slate-50"
+                  >
+                    View Module
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </main>
       </div>
-
-      {moduleSubmitted && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#062b4f]/60 p-5 backdrop-blur-sm">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="module-result-title"
-            className="w-full max-w-lg rounded-2xl bg-white p-7 shadow-2xl"
-          >
-            <div className="text-center">
-              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[#e6f3fb] text-[#168dcc]">
-                <Trophy size={30} />
-              </div>
-
-              <h2
-                id="module-result-title"
-                className="mt-4 text-2xl font-bold text-[#062b4f]"
-              >
-                Module Complete!
-              </h2>
-
-              <p className="mt-1 text-sm text-slate-500">
-                You have completed {module.title}.
-              </p>
-            </div>
-
-            <div className="mt-7 rounded-xl bg-[#f4f9fd] p-6 text-center">
-              <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Overall Score
-              </p>
-
-              <p className="mt-1 text-5xl font-bold text-[#0b4778]">
-                {averageScore}%
-              </p>
-
-              <p className="mt-2 text-xs text-slate-500">
-                {correctAnswers} of {totalScenarios} scenarios correct
-              </p>
-            </div>
-
-            <div className="mt-5 grid grid-cols-3 gap-3">
-              <ScoreCard label="Accuracy" value={moduleAccuracy} />
-              <ScoreCard label="Clarity" value={averageClarity} />
-              <ScoreCard label="Phraseology" value={averagePhraseology} />
-            </div>
-
-            <div className="mt-5 rounded-lg border border-green-200 bg-green-50 p-4">
-              <p className="text-sm font-semibold text-green-700">
-                Training completed successfully
-              </p>
-
-              <p className="mt-1 text-xs leading-5 text-green-600">
-                Your module performance has been calculated from your scenario
-                responses and speech assessment.
-              </p>
-            </div>
-
-            <div className="mt-6 grid gap-3 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => router.push("/modules")}
-                className="flex h-11 items-center justify-center rounded-lg border border-slate-300 bg-white text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
-              >
-                Back to Modules
-              </button>
-
-              <button
-                type="button"
-                onClick={() => router.push("/modules")}
-                className="flex h-11 items-center justify-center rounded-lg bg-[#0b4778] text-sm font-semibold text-white transition hover:bg-[#062b4f]"
-              >
-                More Modules
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

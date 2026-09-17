@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   BarChart3,
@@ -16,7 +17,6 @@ import {
   getDocs,
   Timestamp,
 } from "firebase/firestore";
-import { useRouter } from "next/navigation";
 import {
   Bar,
   BarChart,
@@ -69,6 +69,7 @@ export default function AdminResultsPage() {
   const [moduleFilter, setModuleFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+
   const [error, setError] = useState("");
 
   async function loadResults(showRefresh = false) {
@@ -79,6 +80,10 @@ export default function AdminResultsPage() {
     }
 
     try {
+      /*
+       * Verify that the currently authenticated user
+       * has an admin role.
+       */
       const currentUser = await getDoc(doc(db, "users", user.uid));
 
       if (currentUser.data()?.role !== "admin") {
@@ -88,18 +93,30 @@ export default function AdminResultsPage() {
 
       setAuthorized(true);
 
+      /*
+       * Admins can load all completed results.
+       */
       const snap = await getDocs(collection(db, "results"));
 
-      const loaded = snap.docs.map((item) => {
+      const loaded: ResultRecord[] = snap.docs.map((item) => {
         const data = item.data();
 
         return {
           id: item.id,
-          userId: data.userId || "",
-          userName: data.userName || "Student",
-          userEmail: data.userEmail || "",
-          moduleId: data.moduleId || "",
-          moduleTitle: data.moduleTitle || "Untitled Module",
+
+          userId: typeof data.userId === "string" ? data.userId : "",
+
+          userName:
+            typeof data.userName === "string" ? data.userName : "Student",
+
+          userEmail: typeof data.userEmail === "string" ? data.userEmail : "",
+
+          moduleId: typeof data.moduleId === "string" ? data.moduleId : "",
+
+          moduleTitle:
+            typeof data.moduleTitle === "string"
+              ? data.moduleTitle
+              : "Untitled Module",
 
           score: typeof data.score === "number" ? data.score : 0,
 
@@ -127,14 +144,19 @@ export default function AdminResultsPage() {
           durationSeconds:
             typeof data.durationSeconds === "number" ? data.durationSeconds : 0,
 
-          completedAt: data.completedAt,
-        } satisfies ResultRecord;
+          completedAt:
+            data.completedAt instanceof Timestamp
+              ? data.completedAt
+              : undefined,
+        };
       });
 
+      /*
+       * Sort newest submissions first.
+       */
       loaded.sort(
         (a, b) =>
-          (b.completedAt?.toMillis?.() || 0) -
-          (a.completedAt?.toMillis?.() || 0),
+          (b.completedAt?.toMillis() ?? 0) - (a.completedAt?.toMillis() ?? 0),
       );
 
       setResults(loaded);
@@ -161,26 +183,35 @@ export default function AdminResultsPage() {
 
     void loadResults();
 
+    // loadResults intentionally depends on the current authenticated user.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, user]);
 
+  /*
+   * Build the module filter list from the loaded results.
+   */
   const modules = useMemo(() => {
     const map = new Map<string, string>();
 
     results.forEach((result) => {
-      map.set(result.moduleId, result.moduleTitle);
+      if (result.moduleId) {
+        map.set(result.moduleId, result.moduleTitle);
+      }
     });
 
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   }, [results]);
 
+  /*
+   * Apply module and date filters.
+   */
   const filtered = useMemo(() => {
     const from = fromDate ? new Date(`${fromDate}T00:00:00`) : null;
 
     const to = toDate ? new Date(`${toDate}T23:59:59.999`) : null;
 
     return results.filter((result) => {
-      const completed = result.completedAt?.toDate?.() || null;
+      const completed = result.completedAt?.toDate() ?? null;
 
       const moduleMatches =
         moduleFilter === "all" || result.moduleId === moduleFilter;
@@ -193,6 +224,9 @@ export default function AdminResultsPage() {
     });
   }, [results, moduleFilter, fromDate, toDate]);
 
+  /*
+   * Summary metrics.
+   */
   const averageScore = filtered.length
     ? Math.round(
         filtered.reduce((sum, item) => sum + item.score, 0) / filtered.length,
@@ -213,7 +247,7 @@ export default function AdminResultsPage() {
     : 0;
 
   /*
-   * Average score by module
+   * Average score by module.
    */
   const moduleChart = useMemo(() => {
     const map = new Map<
@@ -226,7 +260,7 @@ export default function AdminResultsPage() {
     >();
 
     filtered.forEach((item) => {
-      const existing = map.get(item.moduleId) || {
+      const existing = map.get(item.moduleId) ?? {
         title: item.moduleTitle,
         total: 0,
         count: 0,
@@ -241,13 +275,13 @@ export default function AdminResultsPage() {
     return Array.from(map.values())
       .map((item) => ({
         module: item.title,
-        average: Math.round(item.total / item.count),
+        average: item.count > 0 ? Math.round(item.total / item.count) : 0,
       }))
       .sort((a, b) => b.average - a.average);
   }, [filtered]);
 
   /*
-   * Score distribution for the pie chart
+   * Score distribution for the pie chart.
    */
   const scoreDistribution = useMemo(() => {
     const buckets = [
@@ -287,7 +321,7 @@ export default function AdminResultsPage() {
   }, [filtered]);
 
   /*
-   * Clarity vs phraseology by module
+   * Clarity vs phraseology by module.
    */
   const communicationChart = useMemo(() => {
     const map = new Map<
@@ -301,7 +335,7 @@ export default function AdminResultsPage() {
     >();
 
     filtered.forEach((item) => {
-      const existing = map.get(item.moduleId) || {
+      const existing = map.get(item.moduleId) ?? {
         title: item.moduleTitle,
         clarityTotal: 0,
         phraseologyTotal: 0,
@@ -317,8 +351,11 @@ export default function AdminResultsPage() {
 
     return Array.from(map.values()).map((item) => ({
       module: item.title,
-      clarity: Math.round(item.clarityTotal / item.count),
-      phraseology: Math.round(item.phraseologyTotal / item.count),
+
+      clarity: item.count > 0 ? Math.round(item.clarityTotal / item.count) : 0,
+
+      phraseology:
+        item.count > 0 ? Math.round(item.phraseologyTotal / item.count) : 0,
     }));
   }, [filtered]);
 
@@ -384,6 +421,7 @@ export default function AdminResultsPage() {
         </div>
 
         <div className="mt-4 grid gap-4 md:grid-cols-3">
+          {/* Module */}
           <label className="text-xs font-semibold text-slate-600">
             Module
             <select
@@ -401,6 +439,7 @@ export default function AdminResultsPage() {
             </select>
           </label>
 
+          {/* From date */}
           <label className="text-xs font-semibold text-slate-600">
             From date
             <div className="relative mt-2">
@@ -418,6 +457,7 @@ export default function AdminResultsPage() {
             </div>
           </label>
 
+          {/* To date */}
           <label className="text-xs font-semibold text-slate-600">
             To date
             <div className="relative mt-2">
@@ -450,7 +490,7 @@ export default function AdminResultsPage() {
 
       {/* Main Charts */}
       <div className="mt-5 grid gap-5 lg:grid-cols-2">
-        {/* Bar Chart */}
+        {/* Average score by module */}
         <ChartCard title="Average Score by Module">
           {moduleChart.length === 0 ? (
             <Empty />
@@ -509,7 +549,7 @@ export default function AdminResultsPage() {
           )}
         </ChartCard>
 
-        {/* Pie Chart */}
+        {/* Score distribution */}
         <ChartCard title="Score Distribution">
           {filtered.length === 0 ? (
             <Empty />
@@ -530,7 +570,7 @@ export default function AdminResultsPage() {
                     stroke="#ffffff"
                     labelLine={false}
                     label={({ name, percent }) =>
-                      percent > 0
+                      percent !== undefined && percent > 0
                         ? `${name} ${(percent * 100).toFixed(0)}%`
                         : ""
                     }
@@ -538,7 +578,7 @@ export default function AdminResultsPage() {
                     {scoreDistribution.map((entry, index) => (
                       <Cell
                         key={`score-cell-${entry.name}`}
-                        fill={SCORE_COLORS[index]}
+                        fill={SCORE_COLORS[index] ?? "#168dcc"}
                       />
                     ))}
                   </Pie>
@@ -572,7 +612,7 @@ export default function AdminResultsPage() {
         </ChartCard>
       </div>
 
-      {/* Communication Performance Chart */}
+      {/* Communication Performance */}
       <div className="mt-5">
         <ChartCard title="Clarity vs Phraseology by Module">
           {communicationChart.length === 0 ? (

@@ -13,6 +13,7 @@ import {
   Play,
   RotateCcw,
   Square,
+  Trophy,
   Video,
   Volume2,
 } from "lucide-react";
@@ -82,6 +83,15 @@ type ModuleProgress = {
   lastScenarioId: string;
 };
 
+type ScenarioResult = {
+  scenarioId: string;
+  scenarioTitle: string;
+  isCorrect: boolean;
+  score: number | null;
+  clarity: number | null;
+  phraseology: number | null;
+};
+
 function SimulationPageContent() {
   const searchParams = useSearchParams();
   const moduleId = searchParams.get("moduleId") || searchParams.get("module");
@@ -123,6 +133,11 @@ function SimulationPageContent() {
   );
   const [moduleProgress, setModuleProgress] = useState(0);
 
+  // Phase 1: keep the completed scenario results in the current session
+  // so the module result can be shown when the final scenario is submitted.
+  const [scenarioResults, setScenarioResults] = useState<ScenarioResult[]>([]);
+  const [moduleSubmitted, setModuleSubmitted] = useState(false);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -133,6 +148,9 @@ function SimulationPageContent() {
   const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
+
+  const aiFeedbackSpeechKeyRef = useRef<string | null>(null);
+  const incomingSpeechKeyRef = useRef<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -355,6 +373,63 @@ function SimulationPageContent() {
   }
 
   /*
+   * Speak the AI evaluation feedback.
+   */
+  function speakAiFeedback(feedbackText = aiFeedback) {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setRecordingError("Text-to-speech is not supported by this browser.");
+      return;
+    }
+
+    const text = feedbackText.trim();
+
+    if (!text) {
+      return;
+    }
+
+    const speechId = "ai-feedback";
+
+    if (playingSpeechId === speechId) {
+      stopSpeech();
+      return;
+    }
+
+    stopSpeech();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+
+    utterance.lang = "en-GB";
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    const voice = getPreferredVoice();
+
+    if (voice) {
+      utterance.voice = voice;
+    }
+
+    utterance.onstart = () => {
+      setPlayingSpeechId(speechId);
+    };
+
+    utterance.onend = () => {
+      setPlayingSpeechId(null);
+      speechUtteranceRef.current = null;
+    };
+
+    utterance.onerror = () => {
+      setPlayingSpeechId(null);
+      speechUtteranceRef.current = null;
+    };
+
+    speechUtteranceRef.current = utterance;
+    setPlayingSpeechId(speechId);
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  /*
    * Load module, scenarios, and the student's saved progress.
    */
   useEffect(() => {
@@ -499,6 +574,8 @@ function SimulationPageContent() {
         // Reset current-session response state
         setSelectedAnswer(null);
         setSubmitted(false);
+        setScenarioResults([]);
+        setModuleSubmitted(false);
       } catch (error) {
         console.error("Error loading simulation:", error);
 
@@ -592,6 +669,55 @@ function SimulationPageContent() {
 
   const scenarioNumber = currentScenarioIndex + 1;
   const totalScenarios = scenarios.length;
+
+  /*
+   * Automatically play the incoming communication once when a new scenario
+   * becomes available. The ref prevents playback from restarting on normal
+   * React re-renders.
+   */
+  useEffect(() => {
+    if (!currentScenario || currentScenario.dialogue.length === 0) {
+      return;
+    }
+
+    const speechKey = currentScenario.id;
+
+    if (incomingSpeechKeyRef.current === speechKey) {
+      return;
+    }
+
+    incomingSpeechKeyRef.current = speechKey;
+
+    const timer = window.setTimeout(() => {
+      speakIncomingCommunication();
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [currentScenario?.id]);
+
+  /*
+   * Automatically read the AI feedback once after each evaluation.
+   * The key prevents repeated playback when React re-renders.
+   */
+  useEffect(() => {
+    if (!submitted || !aiFeedback.trim() || !currentScenario) {
+      return;
+    }
+
+    const speechKey = `${currentScenario.id}:${aiFeedback}`;
+
+    if (aiFeedbackSpeechKeyRef.current === speechKey) {
+      return;
+    }
+
+    aiFeedbackSpeechKeyRef.current = speechKey;
+
+    const timer = window.setTimeout(() => {
+      speakAiFeedback(aiFeedback);
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [submitted, aiFeedback, currentScenario?.id]);
 
   const scenarioPositionProgress =
     totalScenarios > 0
@@ -692,6 +818,7 @@ function SimulationPageContent() {
       setAiClarity(null);
       setAiPhraseology(null);
       setAiFeedback("");
+      incomingSpeechKeyRef.current = null;
       setRecordingSeconds(0);
       setSubmitted(false);
       setIsRecording(true);
@@ -759,6 +886,8 @@ function SimulationPageContent() {
     setAiClarity(null);
     setAiPhraseology(null);
     setAiFeedback("");
+    aiFeedbackSpeechKeyRef.current = null;
+    incomingSpeechKeyRef.current = null;
     setRecordingSeconds(0);
     setRecordingError("");
     setSubmitted(false);
@@ -843,6 +972,30 @@ function SimulationPageContent() {
       setAiFeedback(finalFeedback);
       setSubmitted(true);
 
+      // Keep this scenario's result in memory for the module completion report.
+      setScenarioResults((previous) => {
+        const result: ScenarioResult = {
+          scenarioId: currentScenario.id,
+          scenarioTitle: currentScenario.title,
+          isCorrect: correct,
+          score: finalScore,
+          clarity: finalClarity,
+          phraseology: finalPhraseology,
+        };
+
+        const existingIndex = previous.findIndex(
+          (item) => item.scenarioId === currentScenario.id,
+        );
+
+        if (existingIndex >= 0) {
+          const updated = [...previous];
+          updated[existingIndex] = result;
+          return updated;
+        }
+
+        return [...previous, result];
+      });
+
       /*
        * Save individual attempt.
        *
@@ -922,6 +1075,8 @@ function SimulationPageContent() {
     setAiClarity(null);
     setAiPhraseology(null);
     setAiFeedback("");
+    aiFeedbackSpeechKeyRef.current = null;
+    incomingSpeechKeyRef.current = null;
     setRecordingSeconds(0);
     setRecordingError("");
 
@@ -949,6 +1104,8 @@ function SimulationPageContent() {
     setAiClarity(null);
     setAiPhraseology(null);
     setAiFeedback("");
+    aiFeedbackSpeechKeyRef.current = null;
+    incomingSpeechKeyRef.current = null;
     setRecordingSeconds(0);
     setRecordingError("");
 
@@ -1160,6 +1317,49 @@ function SimulationPageContent() {
   const isCorrect = selectedAnswer === currentScenario.correctOptionId;
 
   const isIncomingPlaying = playingSpeechId === "incoming";
+
+  const isLastScenario = currentScenarioIndex === totalScenarios - 1;
+
+  const completedResultsCount = scenarioResults.length;
+
+  const correctAnswers = scenarioResults.filter(
+    (result) => result.isCorrect,
+  ).length;
+
+  const moduleAccuracy =
+    completedResultsCount > 0
+      ? Math.round((correctAnswers / completedResultsCount) * 100)
+      : 0;
+
+  const averageScore =
+    completedResultsCount > 0
+      ? Math.round(
+          scenarioResults.reduce(
+            (sum, result) => sum + (result.score ?? 0),
+            0,
+          ) / completedResultsCount,
+        )
+      : 0;
+
+  const averageClarity =
+    completedResultsCount > 0
+      ? Math.round(
+          scenarioResults.reduce(
+            (sum, result) => sum + (result.clarity ?? 0),
+            0,
+          ) / completedResultsCount,
+        )
+      : 0;
+
+  const averagePhraseology =
+    completedResultsCount > 0
+      ? Math.round(
+          scenarioResults.reduce(
+            (sum, result) => sum + (result.phraseology ?? 0),
+            0,
+          ) / completedResultsCount,
+        )
+      : 0;
 
   return (
     <div className="min-h-screen bg-[#f5f8fb]">
@@ -1593,11 +1793,33 @@ function SimulationPageContent() {
                         </div>
                       )}
 
-                      <p className="mt-4 text-xs leading-5 text-slate-600">
-                        {aiFeedback ||
-                          currentScenario.explanation ||
-                          "No AI feedback is available for this scenario."}
-                      </p>
+                      <div className="mt-4 rounded-lg border border-[#c8e3f5] bg-[#f4f9fd] p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                              AI Feedback
+                            </p>
+                            <p className="mt-2 text-xs leading-5 text-slate-600">
+                              {aiFeedback ||
+                                currentScenario.explanation ||
+                                "No AI feedback is available for this scenario."}
+                            </p>
+                          </div>
+
+                          {aiFeedback.trim() && (
+                            <button
+                              type="button"
+                              onClick={() => speakAiFeedback()}
+                              className="flex shrink-0 items-center gap-2 rounded-lg border border-[#168dcc] bg-white px-3 py-2 text-xs font-semibold text-[#1478bd] transition hover:bg-[#e6f3fb]"
+                            >
+                              <Volume2 size={15} />
+                              {playingSpeechId === "ai-feedback"
+                                ? "Stop"
+                                : "Listen"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
 
                       {!isCorrect && currentScenario.correctOptionId && (
                         <p className="mt-3 text-xs font-semibold text-red-600">
@@ -1735,22 +1957,111 @@ function SimulationPageContent() {
               Scenario {scenarioNumber} of {totalScenarios}
             </span>
 
-            <button
-              type="button"
-              onClick={handleNextScenario}
-              disabled={
-                (!submitted &&
-                  !completedScenarioIds.includes(currentScenario.id)) ||
-                currentScenarioIndex >= scenarios.length - 1
-              }
-              className="flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold text-[#1478bd] transition hover:bg-[#e6f3fb] disabled:cursor-not-allowed disabled:opacity-30"
-            >
-              Next
-              <ChevronRight size={15} />
-            </button>
+            {isLastScenario && submitted ? (
+              <button
+                type="button"
+                onClick={() => setModuleSubmitted(true)}
+                disabled={isAnalyzing}
+                className="flex items-center gap-2 rounded-lg bg-[#168dcc] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0b4778] disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                Submit Module
+                <Trophy size={15} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleNextScenario}
+                disabled={
+                  (!submitted &&
+                    !completedScenarioIds.includes(currentScenario.id)) ||
+                  currentScenarioIndex >= scenarios.length - 1
+                }
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold text-[#1478bd] transition hover:bg-[#e6f3fb] disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                Next
+                <ChevronRight size={15} />
+              </button>
+            )}
           </div>
         </main>
       </div>
+
+      {moduleSubmitted && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#062b4f]/60 p-5 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="module-result-title"
+            className="w-full max-w-lg rounded-2xl bg-white p-7 shadow-2xl"
+          >
+            <div className="text-center">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[#e6f3fb] text-[#168dcc]">
+                <Trophy size={30} />
+              </div>
+
+              <h2
+                id="module-result-title"
+                className="mt-4 text-2xl font-bold text-[#062b4f]"
+              >
+                Module Complete!
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-500">
+                You have completed {module.title}.
+              </p>
+            </div>
+
+            <div className="mt-7 rounded-xl bg-[#f4f9fd] p-6 text-center">
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Overall Score
+              </p>
+
+              <p className="mt-1 text-5xl font-bold text-[#0b4778]">
+                {averageScore}%
+              </p>
+
+              <p className="mt-2 text-xs text-slate-500">
+                {correctAnswers} of {totalScenarios} scenarios correct
+              </p>
+            </div>
+
+            <div className="mt-5 grid grid-cols-3 gap-3">
+              <ScoreCard label="Accuracy" value={moduleAccuracy} />
+              <ScoreCard label="Clarity" value={averageClarity} />
+              <ScoreCard label="Phraseology" value={averagePhraseology} />
+            </div>
+
+            <div className="mt-5 rounded-lg border border-green-200 bg-green-50 p-4">
+              <p className="text-sm font-semibold text-green-700">
+                Training completed successfully
+              </p>
+
+              <p className="mt-1 text-xs leading-5 text-green-600">
+                Your module performance has been calculated from your scenario
+                responses and speech assessment.
+              </p>
+            </div>
+
+            <div className="mt-6 grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => router.push("/modules")}
+                className="flex h-11 items-center justify-center rounded-lg border border-slate-300 bg-white text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+              >
+                Back to Modules
+              </button>
+
+              <button
+                type="button"
+                onClick={() => router.push("/modules")}
+                className="flex h-11 items-center justify-center rounded-lg bg-[#0b4778] text-sm font-semibold text-white transition hover:bg-[#062b4f]"
+              >
+                More Modules
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -210,25 +210,117 @@ function SimulationPageContent() {
   }
 
   /*
-   * Get the best available English voice.
+   * Strict voice selection. The Web Speech API does not expose a reliable
+   * gender property, so we only accept voices whose names strongly identify
+   * them as male. We intentionally do NOT fall back to an unknown/female voice.
    */
-  function getPreferredVoice() {
+  function getAvailableSpeechVoices() {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      return null;
+      return [];
     }
 
-    const voices =
-      speechVoicesRef.current.length > 0
-        ? speechVoicesRef.current
-        : window.speechSynthesis.getVoices();
+    return speechVoicesRef.current.length > 0
+      ? speechVoicesRef.current
+      : window.speechSynthesis.getVoices();
+  }
 
+  const maleVoiceKeywords = [
+    "male",
+    "george",
+    "ryan",
+    "brian",
+    "arthur",
+    "oliver",
+    "thomas",
+    "james",
+    "daniel",
+    "david",
+    "mark",
+    "alex",
+    "aaron",
+    "fred",
+    "guy",
+    "michael",
+    "richard",
+    "matthew",
+    "stephen",
+    "microsoft david",
+    "microsoft mark",
+    "microsoft ryan",
+    "google uk english male",
+    "google us english male",
+  ];
+
+  const femaleVoiceKeywords = [
+    "female",
+    "zira",
+    "susan",
+    "hazel",
+    "samantha",
+    "sonia",
+    "libby",
+    "heera",
+    "catherine",
+    "google uk english female",
+    "google us english female",
+  ];
+
+  function looksLikeMaleVoice(voice: SpeechSynthesisVoice) {
+    const name = voice.name.toLowerCase();
+
+    if (femaleVoiceKeywords.some((keyword) => name.includes(keyword))) {
+      return false;
+    }
+
+    return maleVoiceKeywords.some((keyword) => name.includes(keyword));
+  }
+
+  function getIncomingCommunicationVoice() {
+    const voices = getAvailableSpeechVoices();
+
+    const britishMaleVoices = voices.filter((voice) => {
+      const lang = voice.lang.toLowerCase();
+      return lang.startsWith("en-gb") && looksLikeMaleVoice(voice);
+    });
+
+    return britishMaleVoices[0] || null;
+  }
+
+  function getOptionVoice() {
+    const voices = getAvailableSpeechVoices();
+
+    // Prefer a male US English voice so the options sound clearly different
+    // from the British incoming communication.
+    const americanMaleVoices = voices.filter((voice) => {
+      const lang = voice.lang.toLowerCase();
+      return lang.startsWith("en-us") && looksLikeMaleVoice(voice);
+    });
+
+    if (americanMaleVoices.length > 0) {
+      return americanMaleVoices[0];
+    }
+
+    // Strict male-only fallback: another English accent is acceptable, but
+    // British is avoided when possible so the voices remain distinguishable.
     return (
-      voices.find((voice) => voice.lang.toLowerCase() === "en-gb") ||
-      voices.find((voice) => voice.lang.toLowerCase().startsWith("en-gb")) ||
-      voices.find((voice) => voice.lang.toLowerCase() === "en-us") ||
-      voices.find((voice) => voice.lang.toLowerCase().startsWith("en-")) ||
-      null
+      voices.find((voice) => {
+        const lang = voice.lang.toLowerCase();
+        return (
+          lang.startsWith("en-") &&
+          !lang.startsWith("en-gb") &&
+          looksLikeMaleVoice(voice)
+        );
+      }) || null
     );
+  }
+
+  /*
+   * General fallback for AI feedback. Keep it male British when available.
+   * If none is available, AI feedback will also remain silent rather than
+   * unexpectedly using a female voice.
+   */
+  function getPreferredVoice() {
+    return getIncomingCommunicationVoice();
   }
 
   /*
@@ -251,12 +343,21 @@ function SimulationPageContent() {
 
     const utterance = new SpeechSynthesisUtterance(option.text);
 
-    utterance.lang = "en-GB";
-    utterance.rate = 0.9;
-    utterance.pitch = 1;
-    utterance.volume = 1;
+    // Response options use a male English voice with a different accent/tone
+    // from the British incoming communication voice.
+    const voice = getOptionVoice();
 
-    const voice = getPreferredVoice();
+    if (!voice) {
+      setRecordingError(
+        "No supported male English voice is available on this device. Please install or enable a male English voice in your browser or operating system.",
+      );
+      return;
+    }
+
+    utterance.lang = voice.lang;
+    utterance.rate = 0.93;
+    utterance.pitch = 1.02;
+    utterance.volume = 1;
 
     if (voice) {
       utterance.voice = voice;
@@ -330,12 +431,23 @@ function SimulationPageContent() {
 
       const utterance = new SpeechSynthesisUtterance(currentLine.text);
 
-      utterance.lang = "en-GB";
-      utterance.rate = 0.9;
-      utterance.pitch = 1;
-      utterance.volume = 1;
+      // Incoming bridge communication uses a male British English voice.
+      const voice = getIncomingCommunicationVoice();
 
-      const voice = getPreferredVoice();
+      if (!voice) {
+        setRecordingError(
+          "No supported male British English voice is available on this device. Please install or enable one in your browser or operating system.",
+        );
+        setPlayingSpeechId(null);
+        setActiveDialogueIndex(null);
+        speechUtteranceRef.current = null;
+        return;
+      }
+
+      utterance.lang = voice.lang;
+      utterance.rate = 0.88;
+      utterance.pitch = 0.86;
+      utterance.volume = 1;
 
       if (voice) {
         utterance.voice = voice;

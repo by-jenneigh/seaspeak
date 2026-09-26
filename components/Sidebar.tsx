@@ -3,19 +3,19 @@
 import {
   BookOpen,
   ChartNoAxesColumnIncreasing,
-  CircleUserRound,
   House,
   LayoutDashboard,
   LogOut,
-  Settings,
   Trophy,
   Waves,
+  LibraryBig,
 } from "lucide-react";
 
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+
 import { doc, getDoc } from "firebase/firestore";
 
 import { logoutUser } from "@/lib/auth";
@@ -51,6 +51,12 @@ const navigation: NavigationItem[] = [
     adminOnly: true,
   },
   {
+    name: "Manage Modules",
+    href: "/admin/modules",
+    icon: LibraryBig,
+    adminOnly: true,
+  },
+  {
     name: "Modules",
     href: "/modules",
     icon: BookOpen,
@@ -65,18 +71,22 @@ const navigation: NavigationItem[] = [
     href: "/progress",
     icon: ChartNoAxesColumnIncreasing,
   },
-
-  // {
-  //   name: "Profile",
-  //   href: "/profile",
-  //   icon: CircleUserRound,
-  // },
-  // {
-  //   name: "Settings",
-  //   href: "/settings",
-  //   icon: Settings,
-  // },
 ];
+
+function isNavigationItemActive(pathname: string, href: string) {
+  // Home must be an exact match
+  if (href === "/") {
+    return pathname === "/";
+  }
+
+  // Admin Dashboard must ONLY be active on /admin
+  if (href === "/admin") {
+    return pathname === "/admin";
+  }
+
+  // Other items can remain active for their nested routes
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
 
 export default function Sidebar() {
   const pathname = usePathname();
@@ -137,6 +147,7 @@ export default function Sidebar() {
   return (
     <aside className="fixed left-0 top-0 z-40 flex h-screen w-[230px] flex-col bg-[#062b4f] text-white">
       {/* Logo */}
+
       <div className="flex flex-col items-center px-5 py-7">
         <div className="mb-4 flex items-center justify-center">
           <Image
@@ -150,14 +161,13 @@ export default function Sidebar() {
       </div>
 
       {/* Navigation */}
+
       <nav className="flex-1 px-3">
         <div className="space-y-1">
           {visibleNavigation.map((item) => {
             const Icon = item.icon;
 
-            const active =
-              pathname === item.href ||
-              (item.href !== "/" && pathname.startsWith(item.href));
+            const active = isNavigationItemActive(pathname, item.href);
 
             return (
               <Link
@@ -170,6 +180,7 @@ export default function Sidebar() {
                 }`}
               >
                 <Icon size={18} strokeWidth={1.8} />
+
                 <span>{item.name}</span>
               </Link>
             );
@@ -178,8 +189,10 @@ export default function Sidebar() {
       </nav>
 
       {/* Logout */}
+
       <div className="border-t border-white/10 p-4">
         <button
+          type="button"
           onClick={async () => {
             await logoutUser();
             router.push("/login");
